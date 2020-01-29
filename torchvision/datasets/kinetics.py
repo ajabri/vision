@@ -37,9 +37,9 @@ class Kinetics400(VisionDataset):
     """
 
     def __init__(self, root, frames_per_clip, step_between_clips=1, frame_rate=None,
-                 extensions=('avi',), transform=None, _precomputed_metadata=None):
+                 extensions=('mp4',), transform=None, _precomputed_metadata=None):
         super(Kinetics400, self).__init__(root)
-        extensions = ('avi',)
+        extensions = extensions
 
         classes = list(sorted(list_dir(root)))
         class_to_idx = {classes[i]: i for i in range(len(classes))}

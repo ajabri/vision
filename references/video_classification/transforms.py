@@ -1,6 +1,9 @@
 import torch
 import random
-
+import numpy as np
+from PIL import Image
+import math
+import torch.nn.functional as F
 
 def crop(vid, i, j, h, w):
     return vid[..., i:(i + h), j:(j + w)]
@@ -40,8 +43,11 @@ def pad(vid, padding, fill=0, padding_mode="constant"):
 
 
 def to_normalized_float_tensor(vid):
-    return vid.permute(3, 0, 1, 2).to(torch.float32) / 255
+    # import pdb; pdb.set_trace()
+    if not isinstance(vid, torch.Tensor):
+        vid = torch.from_numpy(vid)
 
+    return vid.permute(3, 0, 1, 2).to(torch.float32) / 255
 
 def normalize(vid, mean, std):
     shape = (-1,) + (1,) * (vid.dim() - 1)
@@ -49,6 +55,87 @@ def normalize(vid, mean, std):
     std = torch.as_tensor(std).reshape(shape)
     return (vid - mean) / std
 
+
+def gaussian_kernel(size, sigma=2., dim=2, channels=3):
+    # The gaussian kernel is the product of the gaussian function of each dimension.
+    # kernel_size should be an odd number.
+    
+    kernel_size = 2*size + 1
+
+    kernel_size = [kernel_size] * dim
+    sigma = [sigma] * dim
+    kernel = 1
+    meshgrids = torch.meshgrid([torch.arange(size, dtype=torch.float32) for size in kernel_size])
+    
+    for size, std, mgrid in zip(kernel_size, sigma, meshgrids):
+        mean = (size - 1) / 2
+        kernel *= 1 / (std * math.sqrt(2 * math.pi)) * torch.exp(-((mgrid - mean) / (2 * std)) ** 2)
+
+    # Make sure sum of values in gaussian kernel equals 1.
+    kernel = kernel / torch.sum(kernel)
+
+    # Reshape to depthwise convolutional weight
+    kernel = kernel.view(1, 1, *kernel.size())
+    kernel = kernel.repeat(channels, *[1] * (kernel.dim() - 1))
+
+    return kernel
+
+import itertools
+class GaussianBlurTransform(object):
+    def __init__(self, sizes=[2*n + 1 for n in range(10)], sigmas=[i+1 for i in range(7)]):
+        self._sizes = sizes
+        self._sigma = sigmas
+        self._kernels = {'%s_%s' % (size, sigma): gaussian_kernel(size=size, sigma=sigma) for size, sigma in itertools.product(self._sizes, self._sigma)}
+
+    def __call__(self, x, size=None, sigma=None):
+        size = size if size is not None else self._sizes[np.random.randint(len(self._sizes))]
+        sigma = sigma if sigma is not None else self._sigma[np.random.randint(len(self._sigma))]
+        kernel = self._kernels['%s_%s' % (size, sigma)]
+
+        kernel_size = 2*size + 1
+
+        is_img = len(x.shape) == 3
+
+        if is_img:
+            x = x[None,...]
+        else:
+            x = x.transpose(0, 1)
+            
+    
+        padding = int((kernel_size - 1) / 2)
+        x = F.pad(x, (padding, padding, padding, padding), mode='reflect')
+        x = F.conv2d(x, kernel, groups=3)
+
+        if is_img:
+            x = torch.squeeze(x)
+        else:
+            x = x.transpose(0, 1)
+    
+        return x
+
+
+class PerTimestepTransform(object):
+    def __init__(self, transforms, pil_convert=True):
+        self.transforms = transforms
+        self.pil_convert = pil_convert
+
+    def __call__(self, vid):
+        if isinstance(vid, torch.Tensor):
+            vid = vid.numpy()
+
+        # for idx in range(vid.shape[0]):
+        #     vid[idx] = np.asarray(self.transforms(Image.fromarray(vid[idx]))) if self.pil_convert else self.transforms(vid[dx])
+        
+        # # return vid
+        if self.pil_convert:
+            x = np.stack([np.asarray(self.transforms(Image.fromarray(v))) for v in vid])
+            # print(x.min(), x.max())
+            # import pdb; pdb.set_trace()
+            return x
+
+        else:
+            return np.stack([self.transforms(v) for v in vid])
+    
 
 # Class interface
 

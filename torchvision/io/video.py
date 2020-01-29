@@ -111,7 +111,7 @@ def _read_from_stream(container, start_offset, end_offset, stream, stream_name):
         container.seek(seek_offset, any_frame=False, backward=True, stream=stream)
     except av.AVError:
         # TODO add some warnings in this case
-        # print("Corrupted file?", container.name)
+        print("Corrupted file?", container.name)
         return []
     buffer_count = 0
     for idx, frame in enumerate(container.decode(**stream_name)):

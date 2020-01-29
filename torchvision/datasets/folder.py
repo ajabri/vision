@@ -33,6 +33,7 @@ def is_image_file(filename):
 
 
 def make_dataset(dir, class_to_idx, extensions=None, is_valid_file=None):
+    print(dir, "!!!!")
     images = []
     dir = os.path.expanduser(dir)
     if not ((extensions is None) ^ (is_valid_file is None)):
@@ -47,6 +48,7 @@ def make_dataset(dir, class_to_idx, extensions=None, is_valid_file=None):
         for root, _, fnames in sorted(os.walk(d)):
             for fname in sorted(fnames):
                 path = os.path.join(root, fname)
+                print(path)
                 if is_valid_file(path):
                     item = (path, class_to_idx[target])
                     images.append(item)

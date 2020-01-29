@@ -12,6 +12,36 @@ model_urls = {
     'r2plus1d_18': 'https://download.pytorch.org/models/r2plus1d_18-91a641e6.pth',
 }
 
+class ReflectionPad3d(nn.padding._ReflectionPadNd):
+    def __init__(self, padding):
+        super(ReflectionPad3d, self).__init__()
+        self.padding = padding
+
+
+class Conv3DSimplePad(nn.Module):
+    def __init__(self,
+                 in_planes,
+                 out_planes,
+                 midplanes=None,
+                 stride=1,
+                 padding=1):
+        super(Conv3DSimplePad, self).__init__()
+        self.modules = nn.Sequential(
+            ReflectionPad3d((padding, padding, padding)),
+            Conv3DSimple(in_planes,
+                out_planes,
+                midplanes,
+                stride,
+                (0, 0, 0))
+        )
+    
+    def forward(self, x):
+        return self.modules(x)
+
+    @staticmethod
+    def get_downsample_stride(stride):
+        return (stride, stride, stride)
+
 
 class Conv3DSimple(nn.Conv3d):
     def __init__(self,
@@ -165,8 +195,9 @@ class BasicStem(nn.Sequential):
     """
     def __init__(self):
         super(BasicStem, self).__init__(
+            ReflectionPad3d((1, 3, 3)),
             nn.Conv3d(3, 64, kernel_size=(3, 7, 7), stride=(1, 2, 2),
-                      padding=(1, 3, 3), bias=False),
+                      padding=(0, 0, 0), bias=False),
             nn.BatchNorm3d(64),
             nn.ReLU(inplace=True))
 
@@ -232,10 +263,13 @@ class VideoResNet(nn.Module):
         x = self.layer3(x)
         x = self.layer4(x)
 
-        x = self.avgpool(x)
-        # Flatten the layer to fc
-        x = x.flatten(1)
-        x = self.fc(x)
+        if self.avgpool is not None:
+            x = self.avgpool(x)
+            # Flatten the layer to fc
+            x = x.flatten(1)
+    
+            if self.fc is not None:
+                x = self.fc(x)
 
         return x
 
