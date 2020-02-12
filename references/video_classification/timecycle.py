@@ -4,7 +4,7 @@ import torch.nn.functional as F
 from scipy.ndimage.filters import gaussian_filter
 
 import torchvision
-import resnet as resnet3d
+import resnet3d
 import resnet2d
 import itertools
 
@@ -47,7 +47,7 @@ class FoldTime(nn.Module):
 
 
 class TimeCycle(nn.Module):
-    def __init__(self, args=None):
+    def __init__(self, args=None, vis=None):
         super(TimeCycle, self).__init__()
         # self.resnet = resnet3d.r3d_18(pretrained=False)
         self.resnet = resnet3d.r2d_10()
@@ -58,6 +58,7 @@ class TimeCycle(nn.Module):
         self.infer_dims()
         # self.resnet_nchan = self.resnet.
 
+        self.selfsim_fc = torch.nn.Linear(self.enc_hid_dim, 128)
         self.selfsim_head = self.make_head([self.enc_hid_dim, 2*self.enc_hid_dim, self.enc_hid_dim])
         self.context_head = self.make_head([self.enc_hid_dim, 2*self.enc_hid_dim, self.enc_hid_dim])
         
@@ -74,7 +75,8 @@ class TimeCycle(nn.Module):
 
         self.target_temp = 1
 
-        self._targets = {}
+        self._xent_targets = {}
+        self._kldv_targets = {}
         
         if args is not None:
             self.kldv_coef = args.kldv_coef
@@ -91,6 +93,9 @@ class TimeCycle(nn.Module):
         
         self.viz = visdom.Visdom(port=8095, env='%s_%s' % (args.name if args is not None else 'test', '')) #int(time.time())))
         self.viz.close()
+
+        if vis is not None:
+            self._viz = vis
 
     def infer_dims(self):
         # if '2D' in str(type(self.resnet.conv1)):
@@ -130,282 +135,242 @@ class TimeCycle(nn.Module):
 
         return I
 
-    def compute_affinity(self, x1, x2, do_dropout=True):
-        N, C, T, H, W  = x1.shape
+    def zeroout_diag(self, A, zero=0):
+        mask = (torch.eye(A.shape[-1]).unsqueeze(0).repeat(A.shape[0], 1, 1).bool() < 1).float().cuda()
+        # import pdb; pdb.set_trace()
+        return A * mask
 
+    def compute_affinity(self, x1, x2, do_dropout=True, zero_diagonal=None):
+        B, C, N = x1.shape
         # assert x1.shape == x2.shape
-        
-        # assuming xs: N, C, 1, H, W
-        x1 = x1.transpose(3, 4).contiguous() # for the inlier counter
-        x1_flat = x1.view(x1.size(0), x1.size(1), -1)
-        x1_flat = x1_flat.transpose(1, 2)
-        x2_flat = x2.transpose(3, 4).contiguous().view(x2.size(0), x2.size(1), -1)
+        A = torch.einsum('bcn,bcm->bnm', x1, x2)
+        A = torch.div(A, 1/(C**0.5))
+        # A = torch.div(A, 1/C**0.5)
 
-        # import pdb; pdb.set_trace()
-
-        A = torch.matmul(x1_flat, x2_flat)
-        A = torch.div(A, C**0.5)
-
-        #         A = torch.div(A, 1/C**0.5)
-
-        if do_dropout:
-            x1_flat, x2_flat = F.dropout(x1_flat, p=0.5), F.dropout(x2_flat, p=0.5)
-
-        # import pdb; pdb.set_trace()
-
-        # if self.dropout_rate > 0:
-        #     A = self.dropout(A)
-
-        if self.zero_diagonal:
-            A[:, torch.eye(A.shape[1]).long().cuda()] = 0
-            
-            # A = 
-        # import pdb; pdb.set_trace()
+        if (zero_diagonal is not False) and self.zero_diagonal:
+            A = self.zeroout_diag(A)
+    
         # A12 = A.view(A.size(0), 1, H * H, W, W)
         # A21 = A.view(A.size(0), 1, H, H, W * W) 
         # A12  = F.softmax(A, dim=2)
         # A21  = F.softmax(A.transpose(1, 2), dim=2)
-        A1, A2 = A, A.transpose(1, 2).clone()
-        
+
+        A1, A2 = A, A.transpose(1, 2)        
         if do_dropout:
             A1, A2 = self.dropout(A1), self.dropout(A2)
-            # A1, A2 = self.dropout(A), self.dropout(A.transpose(1, 2))
 
-        A1 = F.softmax(A1, dim=2)
-        A2 = F.softmax(A2, dim=2)
+        A1, A2 = F.softmax(A1, dim=-1), F.softmax(A2, dim=-1)
 
         AA = torch.matmul(A2, A1)
-
-        # import pdb; pdb.set_trace()
         log_AA = torch.log(AA + 1e-20)
 
-        return A, AA, log_AA
+        return A, AA, log_AA, A1, A2
     
-    def forward_affinity(self, x1, x2, encode=False):
+    def visualize_frame_pair(self, x, ff, mm, t1, t2):
+        # B, C, T, N = ff.shape
+        f1, f2 = ff[:, :, t1], ff[:, :, t2]
+
+        A, AA, log_AA, A1, A2 = self.compute_affinity(f1, f2, do_dropout=False, zero_diagonal=False)
+        log_AA = log_AA.view(-1, log_AA.shape[1])
+        _xent_loss = self.xent(log_AA, self.xent_targets(A))
+        
+        N = A.shape[-1]
+        H = W = int(N**0.5)
+        _AA = AA.view(-1, H * W, H, W)
+
+        # # FLOW
+        # _A = A.view(*A.shape[:2], f1.shape[-1], -1)
+        # u, v = utils.compute_flow(_A[0:1])
+        # flows = torch.stack([u, v], dim=-1).cpu().numpy()
+        # flows = utils.draw_hsv(flows[0])
+        # flows = cv2.resize(flows, (256, 256))
+        # self.viz.image((flows).transpose(2, 0, 1), win='flow')
+        # # flows = [cv2.resize(flow.clip(min=0).astype(np.uint8), (256, 256)) for flow in flows]
+        # # self.viz.image((flows[0]).transpose(2, 0, 1))
+
+        # import pdb; pdb.set_trace()
+
+        if len(x.shape) < 6:
+            # IMG VIZ
+            # X here is B x C x T x H x W
+            x1, x2 = x[0, :, t1], x[0, :, t2]
+            xx = torch.stack([x1, x2]).detach().cpu()
+            xx -= xx.min(); xx /= xx.max()
+            self.viz.images(xx, win='imgs')
+            # self._viz.patches(xx, A)
+
+            # # PCA VIZ
+            pca_ff = utils.pca_feats(torch.stack([f1[0], f2[0]]).detach().cpu())
+            pca_ff = utils.make_gif(pca_ff, outname=None)
+            self.viz.images(pca_ff.transpose(0, -1, 1, 2), win='pcafeats')
+        else:
+            # X here is B x N x C x T x H x W
+            x1, x2 =  x[0, :, :, t1],  x[0, :, :, t2]
+            m1, m2 = mm[0, :, :, t1], mm[0, :, :, t2]
+
+            pca_feats = utils.pca_feats(torch.cat([m1, m2]).detach().cpu())
+            pca_feats = utils.make_gif(pca_feats, outname=None, sz=64).transpose(0, -1, 1, 2)
+            self.viz.images(pca_feats[:N], nrow=int(N**0.5), win='pca_viz1')
+            self.viz.images(pca_feats[N:], nrow=int(N**0.5), win='pca_viz2')
+            
+            for i, xx in enumerate([x1, x2]):
+                self.viz.images((xx-xx.min()) / ((xx-xx.min()).max()), nrow=int(N**0.5), win='pca_viz_imgs_%s' % str(i))
+
+        # LOSS VIS
+        xx = _xent_loss[:H*W]
+        xx -= xx.min()
+        xx /= xx.max()
+        img_grid = [cv2.resize(aa, (50,50), interpolation=cv2.INTER_NEAREST)[None] for aa in _AA[0, :, :, :, None].cpu().detach().numpy()]
+        img_grid = [img_grid[_].repeat(3, 0) * np.array(color(xx[_].item()))[:3, None, None] for _ in range(H*W)]
+        img_grid = [img_grid[_] / img_grid[_].max() for _ in range(H*W)]
+        img_grid = torch.from_numpy(np.array(img_grid))
+        img_grid = torchvision.utils.make_grid(img_grid, nrow=H, padding=1, pad_value=1)
+        
+        # img_grid = cv2.resize(img_grid.permute(1, 2, 0).cpu().detach().numpy(), (1000, 1000), interpolation=cv2.INTER_NEAREST).transpose(2, 0, 1)
+        self.viz.images(img_grid, win='lossvis')
+
+
+    def pixels_to_nodes(self, x):
+        # Encode into B x C x T x N
+        B, N, C, T, h, w = x.shape
+        x = x.reshape(B*N, C, T, h, w) 
+
+        mm = self.resnet(x)
+        H, W = mm.shape[-2:]
+
+        # produce node vector representations by spatially pooling feature maps
+        ff = mm.sum(-1).sum(-1) / (H*W)
+        # ff = torch.einsum('ijklm->ijk', ff) / ff.shape[-1]*ff.shape[-2] 
+
+        ff = self.selfsim_fc(ff.transpose(-1, -2)).transpose(-1,-2)
+        ff = F.normalize(ff, p=2, dim=1)
+    
+        # reshape to add back batch and num node dimensions
+        ff = ff.view(B, N, ff.shape[1], T).permute(0, 2, 3, 1)
+        mm = mm.view(B, N, *mm.shape[1:])
+
+        return ff, mm
+
+
+
+    def kldv_targets(self, A):
         '''
-        For computing similarity of things in X1 w.r.t X2
-        As in, will return (n x H1*W1 x H2 x W2) sized affinity object
+            A: affinity matrix
         '''
+        B, N = A.shape[:2]
+        key = '%s:%sx%s' % (str(A.device), B,N)
 
-        if encode:
-            x1 = self.resnet(x1)
-            x2 = self.resnet(x2)
-        
-        N, C, T, H1, W1 = x1.shape
-        H2, W2 = x2.shape[-2:]
-        
-        A, AA, log_AA = self.compute_affinity(x1, x2)
-        
-        A = A.view(*A.shape[:2], H2, W2)
+        if key not in self._kldv_targets:
+            I = self.make_smooth_target_2d(int(N**0.5), int(N**0.5))
+            I = I[None].repeat(B, 1, 1).view(-1, A.shape[-1]).to(A.device)
+            self._kldv_targets[key] = I
 
-        return A
-    
-    def forward_encoder(self, x):
-        return self.resnet(x)
-    
-    def forward(self, x, just_feats=False):
-        ff = self.resnet(x)
-        ff = self.selfsim_head(ff)
-#         ff = F.normalize(ff, p=2, dim=1)
-        
-        N, C, T, _H, _W = ff.shape
-        _h, _w = _H // 4, _W // 4
+        return self._kldv_targets[key]
 
+    def xent_targets(self, A):
+        B, N = A.shape[:2]
+        key = '%s:%sx%s' % (str(A.device), B,N)
+
+        if key not in self._xent_targets:
+            I = torch.arange(A.shape[-1])[None].repeat(B, 1)
+            I = I.view(-1).to(A.device)
+            self._xent_targets[key] = I
+
+        return self._xent_targets[key]
+
+    def compute_xent_loss(self, A, log_AA):
+        # Cross Entropy
+        targets = self.xent_targets(A)
+        if self.xent_coef > 0:
+            _xent_loss = self.xent(log_AA, targets)
+
+            return _xent_loss.mean().unsqueeze(-1), \
+                (torch.argmax(log_AA, dim=-1) == targets).float().mean().unsqueeze(-1)
+        else:
+            return 0, 0
+
+    def compute_kldv_loss(self, A, log_AA):
+        # KL Div with Smoothed 2D Targets
+        targets = self.kldv_targets(A)
+        if self.kldv_coef > 0:
+            kldv_loss = self.kldv(log_AA, targets)
+            # print(kldv_loss, log_AA.min(), AA.min(), A.min())
+            return kldv_loss
+        else:
+            return 0
+
+    def forward(self, x, orig=None):
         xents = torch.tensor([0.]).cuda()
         kldvs = torch.tensor([0.]).cuda()
-        accur = torch.tensor([0.]).cuda()
+        diags = dict(skip_accur=torch.tensor([0.]).cuda())
 
-        L = len(list(itertools.combinations(range(T), 2)))
-        for (t1, t2) in itertools.combinations(range(T), 2):
-            x1, x2 = ff[:, :, t1:t1+1, _h:-_h, _w:-_w].contiguous(), ff[:, :, t2:t2+1, _h:-_h, _w:-_w].contiguous()
-            #ff[:, :, t2:t2+1, 2*_h:-2*_h, 2*_w:-2*_w].contiguous()
-            
-            # x1, x2 = ff[:, :, t1:t1+1, _h:-_h, _w:-_w].contiguous(), ff[:, :, t2:t2+1, 2*_h:-2*_h, 2*_w:-2*_w].contiguous()
-            # x1, x2 = ff[:, :, t1:t1+1, _H//2-_h:_H//2+_h, _W//2-_w:_W//2+_w].contiguous(), \
-            #     ff[:, :, t2:t2+1, _H//2-_h:_H//2+_h, _W//2-_w:_W//2+_w].contiguous()
-            H, W  = x2.shape[-2:]
+        # Assume input is B x T x N*C x H x W        
+        B, T, C, H, W = x.shape
+        N, C = C//3, 3
+        x = x.transpose(1,2).view(B, N, C, T, H, W)
 
-            # import pdb; pdb.set_trace()
+        ff, mm = self.pixels_to_nodes(x)
+        B, C, T, N = ff.shape
 
-            if H*W not in self._targets:
-                self._targets[H*W] = self.make_smooth_target_2d(H, W)
+        A12s = []
+        A21s = []
+        AAs  = []
 
-            # Self similarity
-            A, AA, log_AA = self.compute_affinity(x1, x2)
-            
-            target = torch.arange(AA.shape[1])[None].repeat(AA.shape[0], 1)
-            target = (target).view(-1).cuda()
-            # import pdb; pdb.set_trace()
+        # produce A between all pairs of frames, store A for adjacent frames
+        t_pairs = list(itertools.combinations(range(T), 2))
+        L = len(t_pairs)
 
-            log_AA = log_AA.view(-1, log_AA.shape[1])
+        for (t1, t2) in t_pairs:
+            f1, f2 = ff[:, :, t1], ff[:, :, t2]
 
-            # Cross Entropy
-            if self.xent_coef > 0:
-                _xent_loss = self.xent(log_AA, target)
-                xents += _xent_loss.mean()
-                # import pdb; pdb.set_trace()
-                # print((torch.argmax(log_AA, dim=-1) == target).sum())
-                accur += (torch.argmax(log_AA, dim=-1) == target).float().mean()
+            A, AA, log_AA, A12, A21 = self.compute_affinity(f1, f2)
+            log_AA = log_AA.view(-1, log_AA.shape[-1])
 
-            # KL Div with Smoothed 2D Targets
-            if self.kldv_coef > 0:
-                I = self._targets[H*W][None].repeat(N, 1, 1).view(-1, A.shape[-1]).cuda()
-                kldv_loss = self.kldv(log_AA, I)
-                # print(kldv_loss, log_AA.min(), AA.min(), A.min())
-                kldvs += kldv_loss
+            xent_loss, acc = self.compute_xent_loss(A, log_AA)
+            kldv_loss = self.compute_kldv_loss(A, log_AA)
 
-            # import pdb; pdb.set_trace()
-            # self.viz.images()
+            xents += xent_loss
+            kldvs += kldv_loss
+            diags['skip_accur'] += acc/L
+
+            if (t2 - t1) == 1:
+                A12s.append(A12)
+                A21s.append(A21)
+                AAs.append(AA)
 
             # _AA = AA.view(-1, H * W, H, W)
             if np.random.random() < 0.003:
-                self.viz.text('%s %s' % (t1, t2), opts=dict(height=1, width=10000))
-
-                # Self similarity
-                A, AA, log_AA = self.compute_affinity(x1, x2, do_dropout=False)
-                log_AA = log_AA.view(-1, log_AA.shape[1])
-                _xent_loss = self.xent(log_AA, target)
-                _AA = AA.view(-1, H * W, H, W)
-
-                _A = A.view(*A.shape[:2], x1.shape[-1], -1)
-                u, v = utils.compute_flow(_A[0:1])
-
-                flows = torch.stack([u, v], dim=-1).cpu().numpy()
-                flows = utils.draw_hsv(flows[0])
-                # import pdb; pdb.set_trace()
-
-                flows = cv2.resize(flows, (256, 256))
-                self.viz.image((flows).transpose(2, 0, 1))
-
-                # flows = [cv2.resize(flow.clip(min=0).astype(np.uint8), (256, 256)) for flow in flows]
-                # self.viz.image((flows[0]).transpose(2, 0, 1))
-
-                # import time
-                # time.sleep(0.1)
-                # import pdb; pdb.set_trace()
-
-                xx = _xent_loss[:H*W]
-                xx -= xx.min()
-                xx /= xx.max()
-                # xx = color(xx.detach().cpu().numpy())
-
-                _img = torch.stack([x[0, :, t1], x[0, :, t2]])
-                _img -= _img.min()
-                _img /= _img.max()
-                self.viz.images(_img)
-
-                pca_ff = utils.pca_feats(torch.stack([ff[0, :, t1], ff[0, :, t2]]).detach().cpu())
-                pca_ff = utils.make_gif(pca_ff, outname=None)
-                self.viz.images(pca_ff.transpose(0, -1, 1, 2))
-
-                img_grid = [cv2.resize(aa, (50,50), interpolation=cv2.INTER_NEAREST)[None] for aa in _AA[0, :, :, :, None].cpu().detach().numpy()]
-                img_grid = [img_grid[_].repeat(3, 0) * np.array(color(xx[_].item()))[:3, None, None] for _ in range(H*W)]
-                img_grid = [img_grid[_] / img_grid[_].max() for _ in range(H*W)]
-                img_grid = torch.from_numpy(np.array(img_grid))
-                
-                img_grid = torchvision.utils.make_grid(img_grid, nrow=H, padding=1, pad_value=1)
-                # img_grid = cv2.resize(img_grid.permute(1, 2, 0).cpu().detach().numpy(), (1000, 1000), interpolation=cv2.INTER_NEAREST).transpose(2, 0, 1)
-                self.viz.images(img_grid)
+                self.viz.text('%s %s' % (t1, t2), opts=dict(height=1, width=10000), win='div')
+                self.visualize_frame_pair(x, ff, mm, t1, t2)
 
 
-        return ff, self.xent_coef * (xents/L), self.kldv_coef * (kldvs/L), accur/L
+        # longer cycle:
+        a12, a21 = A12s[0], A21s[0]
+        for i in range(1, len(A12s)):
+            a12, a21 = torch.matmul(A12s[i], a12), torch.matmul(a21, A21s[i])
+            aa = torch.matmul(a21, a12)
+            log_aa = torch.log(aa + 1e-20).view(-1, aa.shape[-1])
 
-        # return dict(x=ff, xent_loss=xents, kldv_loss=kldvs)
+            xent_loss, acc = self.compute_xent_loss(aa, log_aa)
+            kldv_loss = self.compute_kldv_loss(aa, log_aa)
 
-
-    def forward2(self, x):
-        iH, iW = x.shape[-2:]
-        _ih, _iw = iH // 6, iW // 6
-        base, query = x[:, :, 0:2], x[:, :, -1:, iH//2-_ih:iH//2+_ih, iW//2-_iw:iW//2+_iw]
-
-        # import pdb; pdb.set_trace()
-        X1, X2 = self.resnet(base), self.resnet(query)
-
-        # ff = self.selfsim_head(ff)
-        # ff = F.normalize(ff, p=2, dim=1)
-        
-        N, C = X1.shape[:2]
-        # _h, _w = _H // 10, _W // 10
-
-        xents = torch.tensor([0.]).cuda()
-        kldvs = torch.tensor([0.]).cuda()
-        accur = torch.tensor([0.]).cuda()
-
-        # L = len(list(itertools.combinations(range(T), 2)))
-        # for (t1, t2) in itertools.combinations(range(T), 2):
-        L = 1
-        for _ in range(L):
-            x1, x2 = X1[:, :, 0:1], X2
-            H, W  = x2.shape[-2:]
+            xents += xent_loss
+            kldvs += kldv_loss
+            diags['acc cyc %s' % str(i)] = acc
+            diags['xent cyc %s' % str(i)] = xent_loss.mean().detach()
 
 
-            if H*W not in self._targets:
-                self._targets[H*W] = self.make_smooth_target_2d(H, W)
+        if np.random.random() < 0.01:
+            # all patches
+            all_x = x.permute(0, 3, 1, 2, 4, 5)
+            all_x = all_x.reshape(-1, *all_x.shape[-3:])
+            all_f = ff.permute(0, 2, 3, 1).reshape(-1, ff.shape[1])
+            all_f = all_f.reshape(-1, *all_f.shape[-1:])
+            all_A = torch.einsum('ij,kj->ik', all_f, all_f)
 
-            # Self similarity
-            A, AA, log_AA = self.compute_affinity(x1, x2)
-            
-            target = torch.arange(AA.shape[1])[None].repeat(AA.shape[0], 1)
-            target = (target).view(-1).cuda()
-            # import pdb; pdb.set_trace()
+            utils.nn_patches(self.viz, all_x, all_A[None])
 
-            log_AA = log_AA.view(-1, log_AA.shape[1])
 
-            # Cross Entropy
-            if self.xent_coef > 0:
-                _xent_loss = self.xent(log_AA, target)
-                xents += _xent_loss.mean()
-                # import pdb; pdb.set_trace()
-                # print((torch.argmax(log_AA, dim=-1) == target).sum())
-                accur += (torch.argmax(log_AA, dim=-1) == target).float().mean()
+        return ff, self.xent_coef * (xents/L), self.kldv_coef * (kldvs/L), diags
 
-            # KL Div with Smoothed 2D Targets
-            if self.kldv_coef > 0:
-                I = self._targets[H*W][None].repeat(N, 1, 1).view(-1, A.shape[-1]).cuda()
-                kldv_loss = self.kldv(log_AA, I)
-                # print(kldv_loss, log_AA.min(), AA.min(), A.min())
-                kldvs += kldv_loss
 
-            # import pdb; pdb.set_trace()
-            # self.viz.images()
-
-            # _AA = AA.view(-1, H * W, H, W)
-            if np.random.random() < 0.01:
-
-                # Self similarity
-                A, AA, log_AA = self.compute_affinity(x1, x2, do_dropout=False)
-                log_AA = log_AA.view(-1, log_AA.shape[1])
-                _xent_loss = self.xent(log_AA, target)
-                _AA = AA.view(-1, H * W, H, W)
-
-                import pdb; pdb.set_trace()
-                xx = _xent_loss[:H*W]
-                xx -= xx.min()
-                xx /= xx.max()
-                # xx = color(xx.detach().cpu().numpy())
-
-                _img = torch.stack([x[0, :, 0], x[0, :, -1]])
-                _img -= _img.min()
-                _img /= _img.max()
-                self.viz.text('%s %s' % (0, -1), opts=dict(height=1, width=10000))
-                self.viz.images(_img)
-
-                # import pdb; pdb.set_trace()
-                pca_ff = utils.pca_feats(X1[0, :].transpose(0, 1).detach().cpu())
-                pca_ff = utils.make_gif(pca_ff, outname=None)
-                self.viz.images(pca_ff.transpose(0, -1, 1, 2))
-
-                pca_ff = utils.pca_feats(X2[0, :].transpose(0, 1).detach().cpu())
-                pca_ff = utils.make_gif(pca_ff, outname=None)
-                self.viz.image(pca_ff.transpose(0, -1, 1, 2)[0])
-
-                img_grid = [cv2.resize(aa, (50,50), interpolation=cv2.INTER_NEAREST)[None] for aa in _AA[0, :, :, :, None].cpu().detach().numpy()]
-                img_grid = [img_grid[_].repeat(3, 0) * np.array(color(xx[_].item()))[:3, None, None] for _ in range(H*W)]
-                img_grid = [img_grid[_] / img_grid[_].max() for _ in range(H*W)]
-                img_grid = torch.from_numpy(np.array(img_grid))
-                
-                img_grid = torchvision.utils.make_grid(img_grid, nrow=H, padding=1, pad_value=1)
-                # img_grid = cv2.resize(img_grid.permute(1, 2, 0).cpu().detach().numpy(), (1000, 1000), interpolation=cv2.INTER_NEAREST).transpose(2, 0, 1)
-                self.viz.images(img_grid)
-
-        return x1, self.xent_coef * (xents/L), self.kldv_coef * (kldvs/L), accur/L

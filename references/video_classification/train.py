@@ -12,7 +12,6 @@ import torchvision
 import torchvision.datasets.video_utils
 from kinetics import Kinetics400
 from video_folder import VideoList
-from torchvision import transforms
 
 import utils
 from sampler import DistributedSampler, UniformClipSampler, RandomClipSampler
@@ -26,24 +25,31 @@ except ImportError:
     amp = None
 
 
-def train_one_epoch(model, criterion, optimizer, lr_scheduler, data_loader, device, epoch, print_freq, apex=False, vis=None):
+def train_one_epoch(model, criterion, optimizer, lr_scheduler, data_loader, device, epoch, print_freq,
+    apex=False, vis=None, checkpoint_fn=None):
+
     model.train()
     metric_logger = utils.MetricLogger(delimiter="  ")
     metric_logger.add_meter('lr', utils.SmoothedValue(window_size=1, fmt='{value}'))
     metric_logger.add_meter('clips/s', utils.SmoothedValue(window_size=10, fmt='{value:.3f}'))
 
     header = 'Epoch: [{}]'.format(epoch)
-    for video, target in metric_logger.log_every(data_loader, print_freq, header):
+    for video, orig in metric_logger.log_every(data_loader, print_freq, header):
         start_time = time.time()
-        video, target = video.to(device), target.to(device)
-        
-        output, xent_loss, kldv_loss, accur = model(video)
+
+        video = video.to(device)
+        # import pdb; pdb.set_trace()
+        output, xent_loss, kldv_loss, diagnostics = model(video, orig=orig)
         loss = (xent_loss.mean() + kldv_loss.mean())
 
-        if vis is not None and np.random.random() < 0.1:
+        if vis is not None and np.random.random() < 0.01:
             vis.log('xent_loss', xent_loss.mean().item())
             vis.log('kldv_loss', kldv_loss.mean().item())
-            vis.log('accuracy' , accur.mean().item())
+            for k,v in diagnostics.items():
+                vis.log(k, v.mean().item())
+
+        if checkpoint_fn is not None and np.random.random() < 0.005:
+            checkpoint_fn()
 
         # output, xent_loss, kldv_loss = model(video)
         # loss = (kldv_loss.mean() + xent_loss.mean()) #+ kldv_loss
@@ -72,30 +78,6 @@ def train_one_epoch(model, criterion, optimizer, lr_scheduler, data_loader, devi
         lr_scheduler.step()
 
 
-# def evaluate(model, criterion, data_loader, device):
-#     model.eval()
-#     metric_logger = utils.MetricLogger(delimiter="  ")
-#     header = 'Test:'
-#     with torch.no_grad():
-#         for video, target in metric_logger.log_every(data_loader, 100, header):
-#             video = video.to(device, non_blocking=True)
-#             target = target.to(device, non_blocking=True)
-#             output = model(video)
-#             loss = criterion(output, target)
-
-#             acc1, acc5 = utils.accuracy(output, target, topk=(1, 5))
-#             # FIXME need to take into account that the datasets
-#             # could have been padded in distributed setup
-#             batch_size = video.shape[0]
-#             metric_logger.update(loss=loss.item())
-#             metric_logger.meters['acc1'].update(acc1.item(), n=batch_size)
-#             metric_logger.meters['acc5'].update(acc5.item(), n=batch_size)
-#     # gather the stats from all processes
-#     metric_logger.synchronize_between_processes()
-
-#     print(' * Clip Acc@1 {top1.global_avg:.3f} Clip Acc@5 {top5.global_avg:.3f}'
-#           .format(top1=metric_logger.acc1, top5=metric_logger.acc5))
-#     return metric_logger.acc1.global_avg
 
 
 def _get_cache_path(filepath):
@@ -108,7 +90,7 @@ def _get_cache_path(filepath):
 
 def collate_fn(batch):
     # remove audio from the batch
-    batch = [(d[0], d[2]) for d in batch]
+    batch = [d[0] for d in batch]
     return default_collate(batch)
 
 
@@ -134,29 +116,23 @@ def main(args):
 
     torch.backends.cudnn.benchmark = True
 
+
+    ##### VIDEO SPECIFIC ##########
     # Data loading code
     print("Loading data")
     traindir = os.path.join(args.data_path, 'train_256' if not args.fast_test else 'val_256_bob')
     valdir = os.path.join(args.data_path, 'val_256_bob')
-    normalize = T.Normalize(mean=[0.43216, 0.394666, 0.37645],
-                            std=[0.22803, 0.22145, 0.216989])
 
     print("Loading training data")
     st = time.time()
     cache_path = _get_cache_path(traindir)
-
-    frame_transform_train = utils.make_frame_transform(args.frame_transforms)
-
+    ######################
+    
+    frame_transform_train = utils.get_frame_transform(args)
     transform_train = torchvision.transforms.Compose([
-#         torchvision.transforms.RandomGrayscale(p=1),
         frame_transform_train,
-        T.ToFloatTensorInZeroOne(),
-        T.Resize((256, 256)),
-        # T.Resize((128, 171)),
-        # T.RandomHorizontalFlip(),
-        # T.GaussianBlurTransform(),
-        normalize,
-        # T.RandomCrop((112, 112))
+        # T.ToFloatTensorInZeroOne(),
+        # T.Resize((256, 256)),
     ])
 
     def make_dataset(is_train):
@@ -171,15 +147,19 @@ def main(args):
                 extensions=('mp4'),
                 frame_rate=args.frame_skip
             )
+        elif os.path.isdir(args.data_path): # HACK assume image dataset if data path is a directory
+            return torchvision.datasets.ImageFolder(
+                root=args.data_path,
+                transform=_transform)
         else:
             return VideoList(
-                args,
-                is_train,
+                filelist=args.data_path,
+                clip_len=args.clip_len,
+                is_train=is_train,
                 frame_gap=args.frame_skip,
                 transform=_transform,
                 # frame_transform=_frame_transform
             )
-
 
     if args.cache_dataset and os.path.exists(cache_path):
         print("Loading dataset_train from {}".format(cache_path))
@@ -192,7 +172,7 @@ def main(args):
         dataset = make_dataset(is_train=True)
 
 
-        if args.cache_dataset:
+        if args.cache_dataset and 'kinetics' in args.data_path.lower():
             print("Saving dataset_train to {}".format(cache_path))
             utils.mkdir(os.path.dirname(cache_path))
             utils.save_on_master((dataset, traindir), cache_path)
@@ -202,42 +182,6 @@ def main(args):
 
     print("Took", time.time() - st)
 
-    print("Loading validation data")
-    cache_path = _get_cache_path(valdir)
-
-    transform_test = torchvision.transforms.Compose([
-        T.ToFloatTensorInZeroOne(),
-        # T.Resize((128, 171)),
-        # normalize,
-        # T.CenterCrop((112, 112))
-        T.Resize((256, 256)),
-        normalize
-    ])
-
-    if args.cache_dataset and os.path.exists(cache_path):
-        print("Loading dataset_test from {}".format(cache_path))
-        dataset_test, _ = torch.load(cache_path)
-        dataset_test.transform = transform_test
-    else:
-        if args.distributed:
-            print("It is recommended to pre-compute the dataset cache "
-                  "on a single-gpu first, as it will be faster")
-        # dataset_test = Kinetics400(
-        #     valdir,
-        #     frames_per_clip=args.clip_len,
-        #     step_between_clips=1,
-        #     transform=transform_test,
-        #     extensions=('mp4')
-        # )
-        dataset_test = make_dataset(is_train=False)
-
-        if args.cache_dataset:
-            print("Saving dataset_test to {}".format(cache_path))
-            utils.mkdir(os.path.dirname(cache_path))
-            utils.save_on_master((dataset_test, valdir), cache_path)
-
-    if hasattr(dataset, 'video_clips'):
-        dataset_test.video_clips.compute_clips(args.clip_len, 1, frame_rate=15)
 
     def make_data_sampler(is_train, dataset):
         if hasattr(dataset, 'video_clips'):
@@ -247,35 +191,27 @@ def main(args):
             return torch.utils.data.sampler.RandomSampler(dataset) if is_train else None
             
     print("Creating data loaders")
-    train_sampler, test_sampler = make_data_sampler(True, dataset), \
-                                    make_data_sampler(False, dataset_test)
+    train_sampler = make_data_sampler(True, dataset)
     # train_sampler = train_sampler(dataset.video_clips, args.clips_per_video)
     # test_sampler = test_sampler(dataset_test.video_clips, args.clips_per_video)
 
     if args.distributed:
         train_sampler = DistributedSampler(train_sampler)
-        test_sampler = DistributedSampler(test_sampler)
 
     data_loader = torch.utils.data.DataLoader(
         dataset, batch_size=args.batch_size,
         sampler=train_sampler, num_workers=args.workers,
         pin_memory=True, collate_fn=collate_fn)
 
-    data_loader_test = torch.utils.data.DataLoader(
-        dataset_test, batch_size=args.batch_size,
-        sampler=test_sampler, num_workers=args.workers,
-        pin_memory=True, collate_fn=collate_fn)
-
     print("Creating model")
-    import resnet
+    import resnet3d as resnet
     import timecycle as tc
-    # model = resnet.__dict__[args.model](pretrained=args.pretrained)
-    model = tc.TimeCycle(args)
-    
-    # utils.compute_RF_numerical(model.resnet, torch.ones(1, 3, 1, 112, 112).numpy())
-    # import pdb; pdb.set_trace()
-    # print(utils.compute_RF_numerical(model,img_np))
+    import patchcycle as pc
 
+    # model = resnet.__dict__[args.model](pretrained=args.pretrained)
+
+    model = tc.TimeCycle(args, vis=vis)
+    
     model.to(device)
 
     if args.distributed and args.sync_bn:
@@ -288,9 +224,7 @@ def main(args):
     #     model.parameters(), lr=lr, momentum=args.momentum, weight_decay=args.weight_decay)
     optimizer = torch.optim.Adam(model.parameters(), lr=3e-4)
     if args.apex:
-        model, optimizer = amp.initialize(model, optimizer,
-                                          opt_level=args.apex_opt_level
-                                          )
+        model, optimizer = amp.initialize(model, optimizer, opt_level=args.apex_opt_level )
 
     # convert scheduler to be per iteration, not per epoch, for warmup that lasts
     # between different epochs
@@ -308,7 +242,7 @@ def main(args):
     if args.data_parallel:
         model = torch.nn.parallel.DataParallel(model)
         model_without_ddp = model.module
-
+    
     if args.resume:
         checkpoint = torch.load(args.resume, map_location='cpu')
         model_without_ddp.load_state_dict(checkpoint['model'])
@@ -320,14 +254,7 @@ def main(args):
         evaluate(model, criterion, data_loader_test, device=device)
         return
 
-    print("Start training")
-    start_time = time.time()
-    for epoch in range(args.start_epoch, args.epochs):
-        if args.distributed:
-            train_sampler.set_epoch(epoch)
-        train_one_epoch(model, criterion, optimizer, lr_scheduler, data_loader,
-                        device, epoch, args.print_freq, args.apex, vis=vis)
-        # evaluate(model, criterion, data_loader_test, device=device)
+    def save_model_checkpoint():
         if args.output_dir:
             checkpoint = {
                 'model': model_without_ddp.state_dict(),
@@ -342,6 +269,17 @@ def main(args):
                 checkpoint,
                 os.path.join(args.output_dir, 'checkpoint.pth'))
 
+    print("Start training")
+    start_time = time.time()
+    for epoch in range(args.start_epoch, args.epochs):
+        if args.distributed:
+            train_sampler.set_epoch(epoch)
+        train_one_epoch(model, criterion, optimizer, lr_scheduler, data_loader,
+                        device, epoch, args.print_freq, args.apex,
+                        vis=vis, checkpoint_fn=save_model_checkpoint)
+        # evaluate(model, criterion, data_loader_test, device=device)
+
+
     total_time = time.time() - start_time
     total_time_str = str(datetime.timedelta(seconds=int(total_time)))
     print('Training time {}'.format(total_time_str))
@@ -351,10 +289,12 @@ def parse_args():
     import argparse
     parser = argparse.ArgumentParser(description='PyTorch Classification Training')
 
-    parser.add_argument('--data-path', default='/data/ajabri/kinetics/', help='dataset')
+    parser.add_argument('--data-path', default='/data/ajabri/kinetics/',
+        help='/home/ajabri/data/places365_standard/train/ | /data/ajabri/kinetics/')
+
     parser.add_argument('--model', default='r3d_18', help='model')
     parser.add_argument('--device', default='cuda', help='device')
-    parser.add_argument('--clip-len', default=16, type=int, metavar='N',
+    parser.add_argument('--clip-len', default=8, type=int, metavar='N',
                         help='number of frames per clip')
     parser.add_argument('--clips-per-video', default=5, type=int, metavar='N',
                         help='maximum number of clips per video to consider')
@@ -369,68 +309,32 @@ def parse_args():
     parser.add_argument('--wd', '--weight-decay', default=1e-4, type=float,
                         metavar='W', help='weight decay (default: 1e-4)',
                         dest='weight_decay')
+
     parser.add_argument('--lr-milestones', nargs='+', default=[20, 30, 40], type=int, help='decrease lr on milestones')
     parser.add_argument('--lr-gamma', default=0.1, type=float, help='decrease lr by a factor of lr-gamma')
-    parser.add_argument('--lr-warmup-epochs', default=10, type=int, help='number of warmup epochs')
+    parser.add_argument('--lr-warmup-epochs', default=0, type=int, help='number of warmup epochs')
     parser.add_argument('--print-freq', default=10, type=int, help='print frequency')
     parser.add_argument('--output-dir', default='auto', help='path where to save')
     parser.add_argument('--resume', default='', help='resume from checkpoint')
     parser.add_argument('--start-epoch', default=0, type=int, metavar='N',
                         help='start epoch')
-    parser.add_argument(
-        "--cache-dataset",
-        dest="cache_dataset",
-        help="Cache the datasets for quicker initialization. It also serializes the transforms",
-        action="store_true",
-    )
-    parser.add_argument(
-        "--sync-bn",
-        dest="sync_bn",
-        help="Use sync batch norm",
-        action="store_true",
-    )
-    parser.add_argument(
-        "--test-only",
-        dest="test_only",
-        help="Only test the model",
-        action="store_true",
-    )
-    parser.add_argument(
-        "--pretrained",
-        dest="pretrained",
-        help="Use pre-trained models from the modelzoo",
-        action="store_true",
-    )
+    
+    parser.add_argument( "--cache-dataset", dest="cache_dataset", help="Cache the datasets for quicker initialization. It also serializes the transforms", action="store_true", )
+    parser.add_argument( "--sync-bn", dest="sync_bn", help="Use sync batch norm", action="store_true", )
+    parser.add_argument( "--test-only", dest="test_only", help="Only test the model", action="store_true", )
 
-    parser.add_argument(
-        "--data-parallel",
-        dest="data_parallel",
-        help="",
-        action="store_true",
-    )
+    parser.add_argument( "--pretrained", dest="pretrained", help="Use pre-trained models from the modelzoo", action="store_true", )
 
-    parser.add_argument(
-        "--zero-diagonal",
-        dest="zero_diagonal",
-        help="",
-        action="store_true",
-    )
+    parser.add_argument( "--data-parallel", dest="data_parallel", help="", action="store_true", )
 
-    parser.add_argument(
-        "--fast-test",
-        dest="fast_test",
-        help="",
-        action="store_true",
-    )
+    parser.add_argument( "--zero-diagonal", dest="zero_diagonal", help="", action="store_true", )
+
+    parser.add_argument( "--fast-test", dest="fast_test", help="", action="store_true", )
 
     # Mixed precision training parameters
     parser.add_argument('--apex', action='store_true',
                         help='Use apex for mixed precision training')
-    parser.add_argument('--apex-opt-level', default='O1', type=str,
-                        help='For apex mixed precision training'
-                             'O0 for FP32 training, O1 for mixed precision training.'
-                             'For further detail, see https://github.com/NVIDIA/apex/tree/master/examples/imagenet'
-                        )
+    parser.add_argument('--apex-opt-level', default='O1', type=str, help='For apex mixed precision training' 'O0 for FP32 training, O1 for mixed precision training.' 'For further detail, see https://github.com/NVIDIA/apex/tree/master/examples/imagenet' )
 
     # distributed training parameters
     parser.add_argument('--world-size', default=1, type=int,
@@ -440,15 +344,30 @@ def parse_args():
 
     # my args
     parser.add_argument('--xent-coef', default=1, type=float, help='initial learning rate')
-    parser.add_argument('--kldv-coef', default=1, type=float, help='initial learning rate')
+    parser.add_argument('--kldv-coef', default=0, type=float, help='initial learning rate')
     parser.add_argument('--dropout', default=0, type=float, help='dropout rate on A')
     parser.add_argument('--name', default='', type=str, help='')
 
     parser.add_argument('--frame-transforms', default='crop', type=str,
-        help='random_crop V random_gray V random_flip V random_perspective')
-    parser.add_argument('--frame-skip', default=1, type=int,
-                        help='number of frames to skip when sampling')
+        help='blur ^ crop ^ cj ^ flip')
+    parser.add_argument('--frame-aug', default='', type=str,
+        help='(randpatch | grid) + cj ^ flip')
 
+    parser.add_argument('--frame-skip', default=1, type=int, help='number of frames to skip when sampling')
+
+    parser.add_argument('--img-size', default=256, type=int, help='number of patches sampled')
+    parser.add_argument('--patch-size', default=[64, 64, 3], type=int, nargs="+", help='number of patches sampled')
+    parser.add_argument('--nrel', default=10, type=int, help='number of heads')
+
+    parser.add_argument('--port', default=8095, type=int, help='number of heads')
+    parser.add_argument('--server', default='em4.ist.berkeley.edu', type=str, help='number of heads')
+    parser.add_argument('--npatch', default=5, type=int, help='number of patches sampled')
+
+    # patchifying args
+    parser.add_argument('--pstride', default=[1.0, 1.0], nargs=2,
+        type=float, help='random sample patchify stride from [this*patch_size, patch_size]')
+    parser.add_argument('--npatch-scale', default=[0.2, 0.8], nargs=2,
+        type=float, help='range from which to same patch sizes for random patch sampling')
 
     args = parser.parse_args()
 
@@ -459,12 +378,14 @@ def parse_args():
 
     if args.output_dir == 'auto':
         args.dataset = 'kinetics' if 'kinetics' in args.data_path else 'pennaction'
-        keys = ['dataset', 'xent_coef', 'kldv_coef', 'dropout', 'clip_len', 'frame_transforms', 'zero_diagonal']
+        keys = ['dataset', 'xent_coef', 'kldv_coef', 'dropout', 'clip_len', 'frame_transforms', 'frame_aug', 'zero_diagonal', 'npatch', 'nrel', 'pstride']
         name = '-'.join(["%s:%s" % (k, getattr(args, k)) for k in keys])
         args.output_dir = "checkpoints/%s_%s/" % (args.name, name)
-        args.name = "timecycle_%s_%s" % (args.name, name)
 
-    # import pdb; pdb.set_trace()
+        import datetime
+        dt = datetime.datetime.today()
+        args.name = "%s-%s-timecycle_%s_%s" % (str(dt.month), str(dt.day), args.name, name)
+
     return args
 
 

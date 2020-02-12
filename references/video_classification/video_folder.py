@@ -16,11 +16,10 @@ import scipy.io as sio
 import scipy.misc
 
 class VideoList(data.Dataset):
-    def __init__(self, args, is_train=True, frame_gap=1, transform=None):
+    def __init__(self, filelist, clip_len, is_train=True, frame_gap=1, transform=None):
 
-        self.filelist = args.data_path
-        self.clip_len = args.clip_len
-
+        self.filelist = filelist
+        self.clip_len = clip_len
         self.is_train = is_train
         self.frame_gap = frame_gap
 
@@ -89,4 +88,4 @@ class VideoList(data.Dataset):
         return imgs, torch.tensor(0), torch.tensor(0)
 
     def __len__(self):
-        return len(self.jpgfiles) * 10000
+        return len(self.jpgfiles) * 1000

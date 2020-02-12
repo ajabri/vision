@@ -120,6 +120,11 @@ class PerTimestepTransform(object):
         self.pil_convert = pil_convert
 
     def __call__(self, vid):
+        # import pdb; pdb.set_trace()
+
+        if isinstance(vid, Image.Image):
+            return np.stack([self.transforms(vid)])
+        
         if isinstance(vid, torch.Tensor):
             vid = vid.numpy()
 
@@ -129,10 +134,7 @@ class PerTimestepTransform(object):
         # # return vid
         if self.pil_convert:
             x = np.stack([np.asarray(self.transforms(Image.fromarray(v))) for v in vid])
-            # print(x.min(), x.max())
-            # import pdb; pdb.set_trace()
             return x
-
         else:
             return np.stack([self.transforms(v) for v in vid])
     

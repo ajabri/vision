@@ -277,6 +277,7 @@ import math
 import numbers
 from torch import nn
 from torch.nn import functional as F
+from torchvision import transforms
 
 class GaussianSmoothing(nn.Module):
     """
@@ -351,6 +352,14 @@ from sklearn.decomposition import PCA
 import cv2
 import imageio as io
 
+import visdom
+import time
+import PIL
+import torchvision
+import transforms as T
+import skimage
+
+
 def pca_feats(ff, solver='auto', img_normalize=True):
     ## expect ff to be   N x C x H x W
     
@@ -377,7 +386,7 @@ def pca_feats(ff, solver='auto', img_normalize=True):
     return pca_ff
 
 
-def make_gif(video, outname='/tmp/test.gif'):
+def make_gif(video, outname='/tmp/test.gif', sz=256):
     if hasattr(video, 'shape'):
         video = video.cpu()
         if video.shape[0] == 3:
@@ -389,7 +398,7 @@ def make_gif(video, outname='/tmp/test.gif'):
         video = (video*255).astype(np.uint8)
 #         video = video.chunk(video.shape[0])
         
-    video = [cv2.resize(vv, (256, 256)) for vv in video]
+    video = [cv2.resize(vv, (sz, sz)) for vv in video]
 
     if outname is None:
         return np.stack(video)
@@ -397,60 +406,14 @@ def make_gif(video, outname='/tmp/test.gif'):
     io.mimsave(outname, video, duration = 0.2)
 
 
-def compute_RF_numerical(net,img_np):
-    '''
-    @param net: Pytorch network
-    @param img_np: numpy array to use as input to the networks, it must be full of ones and with the correct
-    shape.
-    '''
-    def weights_init(m):
-        classname = m.__class__.__name__
-        # if classname.find('Pad') != -1:
-        #     m = list(m.modules())[-1]
-        #     m.weight.data.fill_(1)
-        #     if hasattr(m, 'bias') and m.bias is not None:
-        #         m.bias.data.fill_(0)
-        # print(classname)
-        if classname == 'Conv3d':
-            print(m)
-            m.weight.data.fill_(1)
-            if hasattr(m, 'bias') and m.bias is not None:
-                m.bias.data.fill_(0)
-
-    net.apply(weights_init)
-    img_ = torch.from_numpy(img_np).float()
-    img_.requires_grad = True
-    
-    out_cnn = net(img_)
-    out_shape = out_cnn.size()
-    ndims = len(out_cnn.size())
-    grad = torch.zeros(out_cnn.size())
-    l_tmp=[]
-
-    # import pdb; pdb.set_trace()
-    for i in range(ndims):
-        if i==0 or i ==1 or i ==2:#batch or channel
-            l_tmp.append(0)
-        else:
-            l_tmp.append(out_shape[i]//2)
-            
-    grad[tuple(l_tmp)]=100
-
-    import pdb; pdb.set_trace()
-
-    out_cnn.backward(grad)
-    grad_np=img_.grad[0,0].data.numpy()
-    idx_nonzeros=np.where(grad_np!=0)
-    RF=[np.max(idx)-np.min(idx)+1 for idx in idx_nonzeros]
-    
-    return RF
-
-import visdom
-import time
 
 class Visualize(object):
-    def __init__(self, args, log_interval=10):
-        self.vis = visdom.Visdom(port=8095, env="%s_metrics" % args.name)
+    def __init__(self, args, suffix='metrics', log_interval=2*60):
+        self.vis = visdom.Visdom(
+            port=args.port,
+            server='http://%s' % args.server,
+            env="%s_%s" % (args.name, suffix),
+        )
         
         self.data = dict()
 
@@ -479,13 +442,126 @@ class Visualize(object):
                 )
             self._last_flush = time.time()
 
+    def nn_patches(self, P, A_k, prefix='', N=10, K=20):
+        nn_patches(self.vis, P, A_k, prefix, N, K)
 
-import torchvision
-import transforms as T
+def nn_patches(vis, P, A_k, prefix='', N=10, K=20):
+    # produces nearest neighbor visualization of N patches given an affinity matrix with K channels
 
-def make_frame_transform(frame_transform_string):
+    P = P.cpu().detach().numpy()
+    P -= P.min()
+    P /= P.max()
+
+    A_k = A_k.cpu().detach().numpy() #.transpose(-1,-2).numpy()
+    # assert np.allclose(A_k.sum(-1), 1)
+
+    A = np.sort(A_k, axis=-1)
+    I = np.argsort(-A_k, axis=-1)
+    
+    vis.text('', opts=dict(width=10000, height=1), win='%s_patch_header' %(prefix))
+
+
+    for n,i in enumerate(np.random.permutation(P.shape[0])[:N]):
+        p = P[i]
+        vis.text('', opts=dict(width=10000, height=1), win='%s_patch_header_%s' % (prefix, n))
+        vis.image(p,  win='%s_patch_query_%s' % (prefix, n))
+
+        for k in range(I.shape[0]):
+            vis.images(P[I[k, i, :K]], nrow=min(I.shape[-1], 20), win='%s_patch_values_%s_%s' % (prefix, n, k))
+            vis.bar(A[k, i][::-1][:K], opts=dict(height=150, width=500), win='%s_patch_affinity_%s_%s' % (prefix, n, k))
+
+
+def unnormalize(x):
+    t = transforms.Normalize(
+        -np.array([0.4914, 0.4822, 0.4465])/np.array([0.2023, 0.1994, 0.2010]),
+        1/np.array([0.2023, 0.1994, 0.2010]).tolist()
+    )
+    return t(x)
+
+def n_patches(x, transform, shape=(64, 64, 3), scale=[0.2, 0.8]):
+    crop = transforms.Compose([
+        lambda x: PIL.Image.fromarray(x),
+        transforms.RandomResizedCrop(shape[0], scale=size_range)
+    ])    
+
+    if torch.is_tensor(x):
+        x = x.numpy().transpose(1,2, 0)
+    
+    P = []
+    for _ in range(args.npatch):
+        xx = transform(x)
+        P.append(xx)
+
+
+    return torch.cat(P, dim=0)
+
+
+def patch_grid(x, transform, shape=(64, 64, 3), stride=[1.0, 1.0]):
+    stride = np.random.random() * (stride[1] - stride[0]) + stride[0]
+    stride = [int(shape[0]*stride), int(shape[1]*stride), shape[2]]
+
+    spatial_jitter = transforms.Compose([
+        lambda x: PIL.Image.fromarray(x),
+        transforms.RandomResizedCrop(shape[0], scale=(0.7, 0.9))
+    ])
+
+    if torch.is_tensor(x):
+        x = x.numpy().transpose(1, 2, 0)
+    elif 'PIL' in str(type(x)):
+        x = np.array(x)#.transpose(2, 0, 1)
+    
+    winds = skimage.util.view_as_windows(x, shape, step=stride)
+    winds = winds.reshape(-1, *winds.shape[-3:])
+
+    # import pdb; pdb.set_trace()
+
+    # winds = torch.from_numpy(winds).contiguous().view(-1, *winds.shape[-3:])
+    # patches = sklearn.feature_extraction.image.extract_patches_2d(x, shape[1:], 0.0002)
+
+    P = [transform(spatial_jitter(w)) for w in winds]
+
+    return torch.cat(P, dim=0)
+
+
+def get_frame_aug(args):
+    train_transform = []
+
+    if 'cj' in args.frame_aug:
+        train_transform += [
+            transforms.RandomGrayscale(p=0.2),
+            transforms.ColorJitter(0.4, 0.4, 0.4, 0.4),
+        ]
+
+    if 'flip' in args.frame_aug:
+        train_transform += [transforms.RandomHorizontalFlip()]
+
+    train_transform += [
+        transforms.ToTensor(),
+        transforms.Normalize((0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010)),
+    ]
+    train_transform = transforms.Compose(train_transform)
+
+    print('Frame augs:', train_transform, args.frame_aug)
+    def aug(x):
+        if 'grid' in args.frame_aug:
+            return patch_grid(x, transform=train_transform,
+                shape=args.patch_size, stride=args.pstride)
+        elif 'randpatch' in args.frame_aug:
+            return n_patches(x, transform=train_transform,
+                shape=args.patch_size, scale=args.npatch_scale)
+        else:
+            return train_transform(x)
+
+
+    return aug
+
+
+def get_frame_transform(args):
+    imsz = args.img_size
+    norm_size = torchvision.transforms.Resize((imsz, imsz))
+
     tt = []
-    fts = frame_transform_string.split(',')
+    fts = args.frame_transforms.split(',')
 
     # torchvision.transforms.RandomAffine(degrees, translate=None, scale=None, shear=None, resample=False, fillcolor=0),
     # torchvision.transforms.RandomGrayscale(p=0.1)
@@ -497,22 +573,50 @@ def make_frame_transform(frame_transform_string):
     if 'blur' in fts:
         tt += [torchvision.transforms.ToTensor(), T.GaussianBlurTransform(), torchvision.transforms.ToPILImage()]
         
-    if 'gray' in fts:
-        tt.append(torchvision.transforms.RandomGrayscale(p=1))
-    
-    if 'flip' in fts:
-        tt.append(torchvision.transforms.RandomHorizontalFlip(p=0.3))
+    # if 'gray' in fts:
+    #     tt.append(torchvision.transforms.RandomGrayscale(p=1))
 
     if 'crop' in fts:
         tt.append(torchvision.transforms.RandomResizedCrop(
-            256, scale=(0.6, 0.9), ratio=(0.7, 1.3), interpolation=2),)
+            imsz, scale=(0.6, 0.9), ratio=(0.7, 1.3), interpolation=2),)
+    else:
+        tt.append(norm_size)
+
+    if 'cj' in fts:
+        tt += [
+            transforms.RandomGrayscale(p=0.2),
+            transforms.ColorJitter(0.4, 0.4, 0.4, 0.4),
+        ]
+
+    if 'flip' in fts:
+        tt.append(torchvision.transforms.RandomHorizontalFlip())
+    
+    if args.npatch > 1 and args.frame_aug != '':
+        tt += [get_frame_aug(args)]
+    else:
+        tt += [
+            transforms.ToTensor(),
+            transforms.Normalize((0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010)),
+        ]
+         
+    print('Frame transforms:', tt, args.frame_transforms)
+
 
     frame_transform_train = T.PerTimestepTransform(
             torchvision.transforms.Compose(tt)
         )
-    print('Frame transforms:', tt)
-    return frame_transform_train
 
+    plain = torchvision.transforms.Compose([
+        torchvision.transforms.ToPILImage(),
+        norm_size, 
+        transforms.ToTensor(),
+        transforms.Normalize((0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010)),
+    ])
+
+    def with_orig(x):
+        return frame_transform_train(x), plain(x[0])
+
+    return with_orig
 
 # def vis_flow(u, v):
 #     flows = []
