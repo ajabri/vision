@@ -45,23 +45,38 @@ class FoldTime(nn.Module):
     def forward(self, x):
         return x.view(x.shape[0] * x.shape[1], *x.shape[2:])
 
+class From3D(nn.Module):
+    def __init__(self, resnet):
+        super(From3D, self).__init__()
+        self.model = resnet
+    
+    def forward(self, x):
+        N, C, T, h, w = x.shape
+        
+        xx = x.permute(0, 2, 1, 3, 4).view(-1, C, h, w)
+        mm = self.model(xx)
+        # import pdb; pdb.set_trace()
+
+        return mm.view(N, T, *mm.shape[-3:]).permute(0, 2, 1, 3, 4)
 
 class TimeCycle(nn.Module):
     def __init__(self, args=None, vis=None):
         super(TimeCycle, self).__init__()
-        # self.resnet = resnet3d.r3d_18(pretrained=False)
-        self.resnet = resnet3d.r2d_10()
-#         self.resnet = resnet3d.r2d_18(pretrained=True)
+        
+        import torchvision.models.video.resnet as _resnet3d
+        import torchvision.models.resnet as resnet
+        # self.resnet = From3D(resnet.resnet18(pretrained=True))
+        self.resnet = resnet3d.r2d_10(pretrained=False)
+
+        # self.resnet = _resnet3d.r3d_18(pretrained=True)
+        # self.resnet = resnet3d.r2d_18(pretrained=True)
 
         self.resnet.fc, self.resnet.avgpool, self.resnet.layer4 = None, None, None
-
         self.infer_dims()
-        # self.resnet_nchan = self.resnet.
 
         self.selfsim_fc = torch.nn.Linear(self.enc_hid_dim, 128)
         self.selfsim_head = self.make_head([self.enc_hid_dim, 2*self.enc_hid_dim, self.enc_hid_dim])
         self.context_head = self.make_head([self.enc_hid_dim, 2*self.enc_hid_dim, self.enc_hid_dim])
-        
 
         # assuming no fc pre-training
         for m in self.modules():
@@ -99,10 +114,9 @@ class TimeCycle(nn.Module):
 
     def infer_dims(self):
         # if '2D' in str(type(self.resnet.conv1)):
-        dummy = torch.Tensor(1, 3, 1, 224, 224)
+        dummy = torch.zeros(1, 3, 1, 224, 224)
         # else:
         #     dummy = torch.Tensor(1, 3, 224, 224)
-
         dummy_out = self.resnet(dummy)
 
         self.enc_hid_dim = dummy_out.shape[1]
@@ -299,7 +313,7 @@ class TimeCycle(nn.Module):
         else:
             return 0
 
-    def forward(self, x, orig=None):
+    def forward(self, x, orig=None, just_feats=False):
         xents = torch.tensor([0.]).cuda()
         kldvs = torch.tensor([0.]).cuda()
         diags = dict(skip_accur=torch.tensor([0.]).cuda())
@@ -310,6 +324,9 @@ class TimeCycle(nn.Module):
         x = x.transpose(1,2).view(B, N, C, T, H, W)
 
         ff, mm = self.pixels_to_nodes(x)
+
+        if just_feats:
+            return ff, mm
         B, C, T, N = ff.shape
 
         A12s = []

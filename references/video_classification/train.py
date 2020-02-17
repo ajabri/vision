@@ -360,7 +360,7 @@ def parse_args():
     parser.add_argument('--nrel', default=10, type=int, help='number of heads')
 
     parser.add_argument('--port', default=8095, type=int, help='number of heads')
-    parser.add_argument('--server', default='em4.ist.berkeley.edu', type=str, help='number of heads')
+    parser.add_argument('--server', default='localhost', type=str, help='number of heads')
     parser.add_argument('--npatch', default=5, type=int, help='number of patches sampled')
 
     # patchifying args

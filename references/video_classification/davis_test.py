@@ -73,13 +73,50 @@ def color_normalize(x, mean, std):
         t.div_(s)
     return x
 
+import time
+
+
+
+
+######################################################################
+def try_np_load(p):
+    try:
+        return np.load(p)
+    except:
+        return None
+
+def make_lbl_set(lbls):
+    print(lbls.shape)
+    t00 = time.time()
+
+    lbl_set = [np.zeros(3).astype(np.uint8)]
+    count_lbls = [0]    
+    
+    flat_lbls_0 = lbls[0].copy().reshape(-1, lbls.shape[-1]).astype(np.uint8)
+    lbl_set = np.unique(flat_lbls_0, axis=0)
+    count_lbls = [np.all(flat_lbls_0 == ll, axis=-1).sum() for ll in lbl_set]
+    
+    print('lbls', time.time() - t00)
+    
+    # only keep labels that appear ten times?!
+    lbl_set_temp = [ll for ii, ll in enumerate(lbl_set) if count_lbls[ii] > 10]
+    lbl_set = lbl_set_temp
+    print(lbl_set)
+    print(count_lbls)
+
+    return lbl_set
+
+
+######################################################################
+
+
 class DavisSet(data.Dataset):
     def __init__(self, params, is_train=True):
 
         self.filelist = params['filelist']
         self.imgSize = params['imgSize']
         self.videoLen = params['videoLen']
-
+        self.mapSize = params['mapSize']
 
         f = open(self.filelist, 'r')
         self.jpgfiles = []
@@ -108,6 +145,7 @@ class DavisSet(data.Dataset):
         label_path = self.lblfiles[index]
 
         imgs = []
+        imgs_orig = []
         lbls = []
         lbls_onehot = []
         patches = []
@@ -115,12 +153,18 @@ class DavisSet(data.Dataset):
 
         frame_num = len(os.listdir(folder_path)) + self.videoLen
 
-        mean=[0.485, 0.456, 0.406]
-        std=[0.229, 0.224, 0.225]
+        mean, std = (0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010)
+
         
         lbl_paths = []
         img_paths = []
+
+        t000 = time.time()
+
+        # frame_num = 30
         for i in range(frame_num):
+            t00 = time.time()
+
             if i < self.videoLen:
                 img_path = folder_path + "/{:05d}.jpg".format(0)
                 lbl_path = label_path + "/{:05d}.png".format(0)
@@ -129,6 +173,9 @@ class DavisSet(data.Dataset):
                 lbl_path = label_path + "/{:05d}.png".format(i - self.videoLen)
             
             img = load_image(img_path)  # CxHxW
+            
+            # print('loaded', i, time.time() - t00)
+
             ht, wd = img.size(1), img.size(2)
             newh, neww = ht, wd
 
@@ -145,34 +192,88 @@ class DavisSet(data.Dataset):
                 newh = int(self.imgSize * ratio)
                 neww = self.imgSize
 
-            if i == 0:
-                imgs = torch.Tensor(frame_num, 3, newh, neww)
 
+            img_orig = img.clone()
             img = color_normalize(img, mean, std)
-            imgs[i] = img
+
             lblimg  = cv2.imread(lbl_path)
             lblimg  = cv2.resize(lblimg, (newh, neww), cv2.INTER_NEAREST)
 
+            imgs_orig.append(img_orig)
+            imgs.append(img)
             lbls.append(lblimg.copy())
-            
-            lbl_onehot = self.get_onehot_lbl(lbl_path)
-            if lbl_onehot is not None:
-                lbls_onehot.append(lbl_onehot)
-            else:
-                lbls_onehot.append(np.zeros(1))
             
             img_paths.append(img_path)
             lbl_paths.append(lbl_path)
 
-
         # Meta info
         meta = dict(folder_path=folder_path, img_paths=img_paths, lbl_paths=lbl_paths)
 
-        lbls_tensor = torch.Tensor(len(lbls), newh, neww, 3)
-        for i in range(len(lbls)):
-            lbls_tensor[i] = torch.from_numpy(lbls[i])
 
-        return imgs, lbls_tensor, np.stack(lbls_onehot), meta
+        ########################################################
+        # Prepare reshaped label information
+
+        lbls = np.stack(lbls)
+        prefix = '/' + '/'.join(lbl_paths[0].split('.')[:-1])
+
+        # Get lblset
+        lblset_path = "%s_%s.npy" % (prefix, 'lblset')
+        lblset = try_np_load(lblset_path)
+        if lblset is None:
+            print('making label set', lblset_path)
+            lblset = make_lbl_set(lbls)
+            np.save(lblset_path, lblset)
+
+        onehots = []
+        resizes = []
+        for i,p in enumerate(lbl_paths):
+            prefix = '/' + '/'.join(p.split('.')[:-1])
+            # print(prefix)
+            oh_path = "%s_%s.npy" % (prefix, 'onehot')
+            rz_path = "%s_%s.npy" % (prefix, 'size%s' % self.mapSize[0])
+
+            onehot = try_np_load(oh_path) 
+            if onehot is None:
+                print('computing onehot lbl for', oh_path)
+                onehot = np.stack([np.all(lbls[i] == ll, axis=-1) for ll in lblset], axis=-1)
+                np.save(oh_path, onehot)
+
+            resized = try_np_load(rz_path)
+            if resized is None:
+                print('computing resized lbl for', rz_path)
+                resized = cv2.resize(np.float32(onehot), (self.mapSize[0], self.mapSize[0]))
+                np.save(rz_path, resized)
+            
+            onehots.append(onehot )
+            resizes.append(resized)
+            # print('frame', i, time.time() - t00)
+
+
+
+        ########################################################
+        
+        imgs = torch.stack(imgs)
+        imgs_orig = torch.stack(imgs_orig)
+        lbls_tensor = torch.from_numpy(np.stack(lbls))
+        lbls_onehot = np.stack(onehots)
+        lbls_resize = np.stack(resizes)
+
+        assert lbls_onehot.shape[0] == len(meta['lbl_paths'])
+
+        print('vid', i, 'took', time.time() - t000)
+
+        return imgs, imgs_orig, lblset, lbls_tensor, lbls_onehot, lbls_resize, meta
 
     def __len__(self):
         return len(self.jpgfiles)
+
+
+
+
+# class DavisResizedLabels(data.Dataset):
+#     def __getitem__(self, index):
+#         imgs, imgs_orig, lbls_tensor, lbls_onehot, lbls_resize, meta = super(DavisResizedLabels, self).__get__item(index)
+
+
+
+

@@ -28,14 +28,6 @@ from torch.autograd import Variable
 
 
 params = {}
-params['filelist'] = '/home/ajabri/data/davis/val2017.txt'
-# params['batchSize'] = 24
-params['imgSize'] = 320
-params['cropSize'] = 320
-params['videoLen'] = 8
-params['offset'] = 0
-params['sideEdge'] = 80
-params['predFrames'] = 1
 
 
 def str_to_bool(v):
@@ -73,28 +65,26 @@ parser.add_argument('--T', default=1.0, type=float,
 parser.add_argument('--topk_vis', default=20, type=int,
                     help='topk_vis')
 
+parser.add_argument('--all-nn', default=False, action='store_true',
+                    help='use all as nn')
+
 parser.add_argument('--videoLen', default=4, type=int,
                     help='predict how many frames away')
 
 parser.add_argument('--cropSize', default=320, type=int,
                     help='predict how many frames away')
 
-
+parser.add_argument('--filelist', default='/scratch/ajabri/data/davis/val2017.txt', type=str)
 parser.add_argument('--save-path', default='', type=str)
 
 args = parser.parse_args()
-state = {k: v for k, v in args._get_kwargs()}
+params = {k: v for k, v in args._get_kwargs()}
 
 
-params['batchSize'] = state['batchSize']
 print('batchSize: ' + str(params['batchSize']) )
-
-params['videoLen'] = state['videoLen']
 print('videoLen: ' + str(params['videoLen']) )
-
-params['cropSize'] = state['cropSize']
 print('cropSize: ' + str(params['cropSize']) )
-params['imgSize'] = state['cropSize']
+params['imgSize'] = params['cropSize']
 
 
 # Use CUDA
@@ -102,6 +92,10 @@ params['imgSize'] = state['cropSize']
 use_cuda = torch.cuda.is_available()
 args.gpu_id = os.getenv('CUDA_VISIBLE_DEVICES')
 print(args.gpu_id)
+
+import visdom
+vis = visdom.Visdom(port=8095, env='main'); vis.close()
+
 
 # Random seed
 if args.manualSeed is None:
@@ -121,87 +115,39 @@ def partial_load(pretrained_dict, model):
     model_dict.update(pretrained_dict)
     # 3. load the new state dict
     model.load_state_dict(model_dict)
-
-def process_labels(lbls, height_dim, width_dim, lbls_onehot=None):
-    # processing labels
-    t00 = time.time()
-    
-    
-    lbls = lbls[0].data.cpu().numpy()
-    print(lbls.shape)
-
-    lbls_new = []
-
-    lbl_set = []
-    lbl_set.append(np.zeros(3).astype(np.uint8))
-    count_lbls = []
-    count_lbls.append(0)
-    
-    lbls_new = [ll.copy() for ll in lbls]
-    
-    flat_lbls_0 = lbls[0].copy().reshape(-1, lbls.shape[-1]).astype(np.uint8)
-    lbl_set = np.unique(flat_lbls_0, axis=0)
-    count_lbls = [np.all(flat_lbls_0 == ll, axis=-1).sum() for ll in lbl_set]
-    
-    print('lbls', time.time() - t00)
-    
-    # only keep labels that appear ten times?!
-    lbl_set_temp = [ll for ii, ll in enumerate(lbl_set) if count_lbls[ii] > 10]
-    lbl_set = lbl_set_temp
-    print(lbl_set)
-    print(count_lbls)
-    
-    t01 = time.time()
-    if lbls_onehot is None:
-        lbls_onehot = np.stack([np.stack([np.all(_lbl == ll, axis=-1) for ll in lbl_set], axis=-1) for _lbl in lbls])
-    else:
-        assert lbls_onehot.shape[-1] == len(lbl_set)
-    t02 = time.time()
-    
-    lbls_resize2 = np.zeros((lbls.shape[0], height_dim, width_dim, len(lbl_set)))
-    
-    for i in range(lbls.shape[0]):
-        lbls_resize2[i] = cv2.resize(np.float32(lbls_onehot[i]), (height_dim, width_dim))
-        
-    t03 = time.time()
-    print(t03 - t02, 'resize', t02 - t01, 'relabel', t01-t00, 'label')
-        
-    return lbl_set, lbls_resize2, lbls_onehot, lbls_new
-
-
-def dump_lbls_onehot(lbls_onehot, meta):
-    '''
-    to avoid recomputing one-hot version of labels, which is v expensive
-    '''
-    assert lbls_onehot.shape[0] == len(meta['lbl_paths'])
-    
-    for i,l in enumerate(meta['lbl_paths']):
-        name = '/' + '/'.join(l[0].split('.')[:-1]) + '_onehot.npy'
-        np.save(name, lbls_onehot[i])
     
 class Wrap(nn.Module):
     def __init__(self, model):
         super(Wrap, self).__init__()
         self.model = model
         
-    def forward(self, *args, func='forward'):
-        return getattr(self.model, func)(*args)
+    def forward(self, *args, func='forward', **kwargs):
+        return getattr(self.model, func)(*args, **kwargs)
     
+def batched_index_select(input, dim, index):
+    for ii in range(1, len(input.shape)):
+        if ii != dim:
+            index = index.unsqueeze(ii)
+    expanse = list(input.shape)
+    expanse[0] = -1
+    expanse[dim] = -1
+    index = index.expand(expanse)
+    return torch.gather(input, dim, index)
+
 def main():
     global best_loss
     start_epoch = 0  # start from epoch 0 or last checkpoint epoch
-
+    
+    model = tc.TimeCycle()
+    model = Wrap(model)
+    
+    params['mapSize'] = model(torch.zeros(1, 10, 3, args.cropSize, args.cropSize), None, True, func='forward')[1].shape[-2:]
 
     val_loader = torch.utils.data.DataLoader(
         davis.DavisSet(params, is_train=False),
         batch_size=int(params['batchSize']), shuffle=False,
         num_workers=args.workers, pin_memory=True)
 
-    model = tc.TimeCycle()
-    model = Wrap(model)
-    
-#     model = model.cuda()
-    model = torch.nn.DataParallel(model).cuda()
 
     cudnn.benchmark = False
     print('    Total params: %.2fM' % (sum(p.numel() for p in model.parameters())/1000000.0))
@@ -210,114 +156,19 @@ def main():
     if os.path.isfile(args.resume):
         print('==> Resuming from checkpoint..')
         checkpoint = torch.load(args.resume)
-        partial_load(checkpoint['state_dict'], model)
+        # partial_load(checkpoint['model'], model)
+        model.model.load_state_dict(checkpoint['model'])
+
         del checkpoint
     
     model.eval()
+    model = torch.nn.DataParallel(model).cuda()    #     model = model.cuda()
 
     if not os.path.exists(args.save_path):
         os.makedirs(args.save_path)
     
-    
     print('\Testing')
     test_loss = test(val_loader, model, 1, use_cuda)
-
-def do_label_prop(corrfeat2_set, lbl_set, lbls_resize2, imgs_toprint,
-                  save_path, batch_idx,
-                  finput_num, topk_vis, n_context):
-    ##################################################################
-    # Label propagation
-    ##################################################################
-    height_dim, width_dim = corrfeat2_set[0].shape[-2:]
-    
-    for iter in range(len(imgs_toprint) - n_context):
-
-        if iter % 10 == 0:
-            print(iter)
-
-#             imgs = imgs_total[:, iter + 1: iter + n_context, :, :, :]
-#             imgs2 = imgs_total[:, 0, :, :, :].unsqueeze(1)
-#             imgs = torch.cat((imgs2, imgs), dim=1)
-
-        corrfeat2   = corrfeat2_set[iter]
-        corrfeat2   = torch.from_numpy(corrfeat2)
-
-        out_frame_num = int(finput_num)
-        height_dim = corrfeat2.size(2)
-        width_dim = corrfeat2.size(3)
-
-        corrfeat2 = corrfeat2.view(corrfeat2.size(0), height_dim, width_dim, height_dim, width_dim)
-        corrfeat2 = corrfeat2.data.cpu().numpy()
-
-        vis_ids_h = np.zeros((corrfeat2.shape[0], height_dim, width_dim, topk_vis)).astype(np.int)
-        vis_ids_w = np.zeros((corrfeat2.shape[0], height_dim, width_dim, topk_vis)).astype(np.int)
-
-        t05 = time.time()
-
-        atten1d  = corrfeat2.reshape(corrfeat2.shape[0], height_dim * width_dim, height_dim, width_dim)
-        ids = np.argpartition(atten1d, -topk_vis, axis=1)[:, -topk_vis:]
-        # ids = np.argsort(atten1d, axis=1)[:, -topk_vis:]
-
-        hid = ids // width_dim
-        wid = ids % width_dim
-
-        vis_ids_h = wid.transpose(0, 2, 3, 1)
-        vis_ids_w = hid.transpose(0, 2, 3, 1)
-
-        t06 = time.time()
-
-        img_now = imgs_toprint[iter + n_context]
-
-        predlbls = np.zeros((height_dim, width_dim, len(lbl_set)))
-        # predlbls2 = np.zeros((height_dim * width_dim, len(lbl_set)))
-
-        for t in range(finput_num):
-
-            tt1 = time.time()
-
-            h, w, k = np.meshgrid(np.arange(height_dim), np.arange(width_dim), np.arange(topk_vis), indexing='ij')
-            h, w = h.flatten(), w.flatten()
-
-            hh, ww = vis_ids_h[t].flatten(), vis_ids_w[t].flatten()
-
-            if t == 0:
-                lbl = lbls_resize2[0, hh, ww, :]
-            else:
-                lbl = lbls_resize2[t + iter, hh, ww, :]
-
-            np.add.at(predlbls, (h, w), lbl * corrfeat2[t, ww, hh, h, w][:, None])
-
-        t07 = time.time()
-        # print(t07-t06, 'lbl proc', t06-t05, 'argsorts')
-
-        predlbls = predlbls / finput_num
-
-        for t in range(len(lbl_set)):
-            nowt = t
-            predlbls[:, :, nowt] = predlbls[:, :, nowt] - predlbls[:, :, nowt].min()
-            predlbls[:, :, nowt] = predlbls[:, :, nowt] / predlbls[:, :, nowt].max()
-
-
-        lbls_resize2[iter + n_context] = predlbls
-
-        predlbls_cp = predlbls.copy()
-        predlbls_cp = cv2.resize(predlbls_cp, (params['imgSize'], params['imgSize']))
-        predlbls_val = np.zeros((params['imgSize'], params['imgSize'], 3))
-
-        ids = np.argmax(predlbls_cp[:, :, 1 : len(lbl_set)], 2)
-
-        predlbls_val = np.array(lbl_set)[np.argmax(predlbls_cp, axis=-1)]
-        predlbls_val = predlbls_val.astype(np.uint8)
-        predlbls_val2 = cv2.resize(predlbls_val, (img_now.shape[0], img_now.shape[1]), interpolation=cv2.INTER_NEAREST)
-
-        # activation_heatmap = cv2.applyColorMap(predlbls, cv2.COLORMAP_JET)
-        img_with_heatmap =  np.float32(img_now) * 0.5 + np.float32(predlbls_val2) * 0.5
-
-        imname  = save_path + str(batch_idx) + '_' + str(iter + n_context) + '_label.jpg'
-        imname2  = save_path + str(batch_idx) + '_' + str(iter + n_context) + '_mask.png'
-
-        imageio.imwrite(imname, np.uint8(img_with_heatmap))
-        imageio.imwrite(imname2, np.uint8(predlbls_val))
             
 
 def test(val_loader, model, epoch, use_cuda):
@@ -329,24 +180,103 @@ def test(val_loader, model, epoch, use_cuda):
     end = time.time()
     
     job_args = []
-    
-    for batch_idx, (imgs_total, lbls, lbls_onehot, meta) in enumerate(val_loader):
-        
+    print('Beginning')
+
+    n_context = params['videoLen']
+    topk_vis = args.topk_vis
+
+    def do_label_prop(A, lbl_set, lbls_resize, imgs_toprint, save_path, batch_idx, finput_num):        
+        ##################################################################
+        # Label propagation
+        ##################################################################
+
+        nstep = len(imgs_toprint) - n_context
+        indices = torch.cat([
+            torch.zeros(nstep, 1).long(),
+            (torch.arange(n_context)[None].repeat(nstep, 1) + torch.arange(nstep)[:, None])[:, 1:]
+            ], dim=-1)
+
+        if not args.all_nn:
+            N, T, H, W, H, W = A.shape
+            A = A.view(N, T, H*W, H, W)
+            A = torch.nn.functional.softmax(A, dim=-3)
+        else:
+            import pdb; pdb.set_trace()
+
+        for it in range(nstep):
+            if it % 10 == 0:
+                print(it)
+
+            t05 = time.time()
+
+            A_t = A[it].cuda()
+
+            # TODO potentially re-softmax???
+            weights, ids = torch.topk(A_t, topk_vis, dim=1)
+            # weights = torch.nn.functional.softmax(weights, dim=1)
+            # import pdb; pdb.set_trace()
+
+            t06 = time.time()
+
+            A_t = A_t.view(A_t.size(0), H, W, H, W)
+
+            lbls_base = lbls_resize[indices[it]]
+
+            T, H, W, L = lbls_base.shape
+            lbls_base = lbls_base.view(T, H*W, L).cuda()
+
+            predlbls = batched_index_select(
+                lbls_base, 1, ids.view(4, -1)).view(T, topk_vis, H, W, L)
+            predlbls = (weights.unsqueeze(-1) * predlbls).sum(0).sum(0)
+
+            # predlbls /= finput_num
+
+            img_now = imgs_toprint[it + n_context].permute(1,2,0).numpy() * 255
+            print(time.time()-t06, 'lbl proc', t06-t05, 'argsorts')
+
+
+            # normalize across pixels?? labels distribution...
+            # predlbls -= predlbls.min(0)[0].min(0)[0][None, None]
+            # predlbls /= predlbls.max(0)[0].max(0)[0][None, None]
+
+            lbls_resize[it + n_context] = predlbls
+
+            predlbls_cp = predlbls.cpu().numpy().copy()
+            predlbls_cp = cv2.resize(predlbls_cp, (params['imgSize'], params['imgSize']))
+            predlbls_val = np.zeros((params['imgSize'], params['imgSize'], 3))
+
+            ids = np.argmax(predlbls_cp[:, :, 1 : len(lbl_set)], 2)
+
+            predlbls_val = np.array(lbl_set)[np.argmax(predlbls_cp, axis=-1)]
+            predlbls_val = predlbls_val.astype(np.uint8)
+            predlbls_val2 = cv2.resize(predlbls_val, (img_now.shape[0], img_now.shape[1]), interpolation=cv2.INTER_NEAREST)
+
+
+            # import pdb; pdb.set_trace()
+
+            # activation_heatmap = cv2.applyColorMap(predlbls, cv2.COLORMAP_JET)
+            img_with_heatmap =  np.float32(img_now) * 0.5 + np.float32(predlbls_val2) * 0.5
+
+            imname  = save_path + str(batch_idx) + '_' + str(it + n_context) + '_label.jpg'
+            imname2  = save_path + str(batch_idx) + '_' + str(it + n_context) + '_mask.png'
+
+            imageio.imwrite(imname, np.uint8(img_with_heatmap))
+            imageio.imwrite(imname2, np.uint8(predlbls_val))
+
+            vis.image(np.uint8(img_with_heatmap).transpose(2, 0, 1))
+            vis.image(np.uint8(predlbls_val).transpose(2, 0, 1))
+
+    for batch_idx, (imgs_total, imgs_orig, lbl_set, lbls_tensor, lbls_onehot, lbls_resize, meta) in enumerate(val_loader):
+        print('******* Vid %s *******', batch_idx)
+
         if batch_idx > 2: 
             break
             
-        n_context = params['videoLen']
         finput_num = n_context
 
         # measure data loading time
-        imgs_total = torch.autograd.Variable(imgs_total.cuda())
-
-
-        bs = imgs_total.size(0)
-        total_frame_num = imgs_total.size(1)
-        channel_num = imgs_total.size(2)
-        height_len  = imgs_total.size(3)
-        width_len   = imgs_total.size(4)
+        imgs_total = imgs_total.cuda()
+        bs, total_frame_num, channel_num, height_len, weight_len = imgs_total.shape
 
         assert(bs == 1)
 
@@ -363,120 +293,86 @@ def test(val_loader, model, epoch, use_cuda):
         mean=[0.485, 0.456, 0.406]
         std=[0.229, 0.224, 0.225]
 
-        imgs_toprint = []
+        imgs_toprint = [ii for ii in imgs_orig[0]]
 
         # ref image
-        for t in range(imgs_set.shape[0]):
-            img_now = imgs_set[t]
+        t00 = time.time()
 
-            for c in range(3):
-                img_now[c] = img_now[c] * std[c]
-                img_now[c] = img_now[c] + mean[c]
+        # for t in range(imgs_orig.shape[0]):
+        #     img_now = imgs_orig[t]
+        #     img_now = np.transpose(img_now, (1, 2, 0))
+        #     img_now = cv2.resize(img_now, (img_now.shape[0] * 2, img_now.shape[1] * 2) )
+        #     imgs_toprint.append(img_now)
 
-            img_now = img_now * 255
-            img_now = np.transpose(img_now, (1, 2, 0))
-            img_now = cv2.resize(img_now, (img_now.shape[0] * 2, img_now.shape[1] * 2) )
-
-            imgs_toprint.append(img_now)
-
-            imname  = save_path + str(batch_idx) + '_' + str(t) + '_frame.jpg'
-            imageio.imwrite(imname, img_now.astype(np.uint8))
-#             imageio.imwrite(img_now, imname)
+        #     imname  = save_path + str(batch_idx) + '_' + str(t) + '_frame.jpg'
+        #     imageio.imwrite(imname, img_now.astype(np.uint8))
     
-    
+        print('printed images', time.time()-t00)
+
         ##################################################################
         # Compute image features
         ##################################################################        
         
         t00 = time.time()
         feats = []
-        feats = model.module(imgs_total.transpose(1,2), func='forward_encoder').cpu().detach()
+        nodes, feats = model.module(imgs_total, None, True, func='forward')
+
+        feats = feats.detach().squeeze(1)
+        feats = torch.nn.functional.normalize(feats, dim=1)
+
         print('computed features', time.time()-t00)
 
         ##################################################################
         # Prep labels
         ##################################################################        
 
-                
-        height_dim = feats.shape[-2]
-        width_dim  = feats.shape[-1]
-
-        if lbls_onehot.sum() > 0:
-            lbl_set, lbls_resize2, lbls_onehot, lbls_new = process_labels(
-                lbls, height_dim, width_dim, lbls_onehot=lbls_onehot[0])
-        else:
-            lbl_set, lbls_resize2, lbls_onehot, lbls_new = process_labels(
-                lbls, height_dim, width_dim, lbls_onehot=None)
-            dump_lbls_onehot(lbls_onehot, meta)
-        
-            
         for t in range(n_context):
-            nowlbl = lbls_new[t]
+            nowlbl = lbls_tensor[0][t]
             imname  = save_path + str(batch_idx) + '_' + str(t) + '_label.jpg'
-            imageio.imwrite(imname, nowlbl.astype(np.uint8))
-#             imageio.imwrite(nowlbl, imname)
+            imageio.imwrite(imname, nowlbl.numpy().astype(np.uint8))
         print('wrote frames and labels')
-    
         
         ##################################################################
         # Compute correlation features
         ##################################################################
         
-        now_batch_size = 4
         imgs_stack = []
-
         im_num = total_frame_num - n_context
-        corrfeat2_set = []
-                        
-        feats_tensor = torch.Tensor(now_batch_size, feats[0].shape[0], finput_num, *feats.shape[-2:]).cuda()
-        feats_targ_tensor = torch.Tensor(now_batch_size, feats[0].shape[0], 1, *feats.shape[-2:]).cuda()
-        
         t03 = time.time()
-        
-        for iter in range(0, im_num, now_batch_size):
 
-            print(iter)
+        indices = torch.cat([
+            torch.zeros(im_num, 1).long(),
+            (torch.arange(n_context)[None].repeat(im_num, 1) + 
+                torch.arange(im_num)[:, None])[:, 1:]],
+                dim=-1)
+        keys, query = feats[:, :, indices], feats[:, :, n_context:]
 
-            startid = iter
-            endid   = iter + now_batch_size
+        As = []
+        for b in range(0, keys.shape[2], 30):
+            A = torch.einsum('ijklmn,ijkop->iklmnop', keys[:, :, b:b+30], query[:, :, b:b+30]).detach().cpu()
+            As.append(A)
 
-            if endid > im_num:
-                endid = im_num
-
-            now_batch_size2 = endid - startid
-
-            for i in range(now_batch_size2):
-
-                _feats = feats[:, :, iter + i + 1: iter + i + n_context, :, :]
-                _feats2 = feats[:, :, 0:1, :, :]
-
-                feats_tensor[i] = torch.cat((_feats2, _feats), dim=2)
-                feats_targ_tensor[i, :, 0] = feats[0, :, iter + i + n_context]
-
-            corrfeat2_now = model(feats_tensor, feats_targ_tensor, func='forward_affinity')
-            corrfeat2_now = corrfeat2_now.view(now_batch_size, n_context, -1, corrfeat2_now.size(-2), corrfeat2_now.size(-1))
-
-            for i in range(now_batch_size2):
-                corrfeat2_set.append(corrfeat2_now[i].data.cpu().numpy())
-
+        A = torch.cat(As, dim=1)
         t04 = time.time()
         print(t04-t03, 'model forward')
-        
-        import copy
-        job_args.append([
-            copy.deepcopy(corrfeat2_set),  copy.deepcopy(lbl_set), copy.deepcopy(lbls_resize2),
-            imgs_toprint, save_path, batch_idx,
-                finput_num, args.topk_vis, total_frame_num, n_context])
-    
-    
-    import multiprocessing as mp
 
-    pool = mp.Pool(processes=5)
-    for jargs in job_args:
-        pool.apply_async(do_label_prop, args=jargs)
-    pool.close()
-    pool.join()
+        # import pdb; pdb.set_trace()
+
+        do_label_prop(A[0], lbl_set[0], lbls_resize[0], imgs_toprint, save_path, batch_idx, finput_num,)
 
 
+    converted_path = "%s_converted/" % args.save_path[:-1]
+    data_path = os.path.dirname(args.filelist)
+
+    cmd = """python davis/convert_davis.py --in_folder %s --out_folder %s --dataset %s/ && \
+    python %s-2017/python/tools/eval.py -i %s -o %s/results.yaml --year 2017 --phase val \
+    | tee %s/output.txt & """ % (args.save_path, converted_path, data_path, data_path, converted_path, converted_path, converted_path)
+
+    import pdb; pdb.set_trace()
+
+# python davis/convert_davis.py --in_folder results/ --out_folder results_converted/ --dataset /scratch/ajabri/data/davis/ &&     python /scratch/ajabri/data/davis-2017/python/tools/eval.py -i results_converted/ -o results_converted//results.yaml --year 2017 --phase val     | tee results_converted//output.txt &
+
+
+'python davis/convert_davis.py --in_folder /scratch/ajabri/logs/timecycle/results_123456/ --out_folder /scratch/ajabri/logs/timecycle/results_123456_converted/ --dataset /home/ajabri/data/davis/ &&     python /home/ajabri/data/davis-2017/python/tools/eval.py -i /scratch/ajabri/logs/timecycle/results_123456_converted/ -o /scratch/ajabri/logs/timecycle/results_123456_converted//results.yaml --year 2017 --phase val     | tee /scratch/ajabri/logs/timecycle/results_123456_converted//output.txt & '
 if __name__ == '__main__':
     main()
