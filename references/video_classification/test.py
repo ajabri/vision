@@ -59,10 +59,14 @@ parser.add_argument('--gpu-id', default='0,1,2,3', type=str,
                     help='id(s) for CUDA_VISIBLE_DEVICES')
 parser.add_argument('--batchSize', default=1, type=int,
                     help='batchSize')
-parser.add_argument('--T', default=1.0, type=float,
+parser.add_argument('--temperature', default=1.0, type=float,
                     help='temperature')
 
+
 parser.add_argument('--topk_vis', default=20, type=int,
+                    help='topk_vis')
+
+parser.add_argument('--radius', default=10, type=int,
                     help='topk_vis')
 
 parser.add_argument('--all-nn', default=False, action='store_true',
@@ -75,7 +79,7 @@ parser.add_argument('--cropSize', default=320, type=int,
                     help='predict how many frames away')
 
 parser.add_argument('--filelist', default='/scratch/ajabri/data/davis/val2017.txt', type=str)
-parser.add_argument('--save-path', default='', type=str)
+parser.add_argument('--save-path', default='./results', type=str)
 
 args = parser.parse_args()
 params = {k: v for k, v in args._get_kwargs()}
@@ -185,6 +189,8 @@ def test(val_loader, model, epoch, use_cuda):
     n_context = params['videoLen']
     topk_vis = args.topk_vis
 
+    # Radius mask
+    D = None
     def do_label_prop(A, lbl_set, lbls_resize, imgs_toprint, save_path, batch_idx, finput_num):        
         ##################################################################
         # Label propagation
@@ -195,6 +201,7 @@ def test(val_loader, model, epoch, use_cuda):
             torch.zeros(nstep, 1).long(),
             (torch.arange(n_context)[None].repeat(nstep, 1) + torch.arange(nstep)[:, None])[:, 1:]
             ], dim=-1)
+
 
         if not args.all_nn:
             N, T, H, W, H, W = A.shape
@@ -208,13 +215,13 @@ def test(val_loader, model, epoch, use_cuda):
                 print(it)
 
             t05 = time.time()
-
             A_t = A[it].cuda()
 
             # TODO potentially re-softmax???
             weights, ids = torch.topk(A_t, topk_vis, dim=1)
             # weights = torch.nn.functional.softmax(weights, dim=1)
-            # import pdb; pdb.set_trace()
+            weights = torch.nn.functional.normalize(weights, dim=1, p=1)
+            import pdb; pdb.set_trace()   
 
             t06 = time.time()
 
@@ -226,7 +233,7 @@ def test(val_loader, model, epoch, use_cuda):
             lbls_base = lbls_base.view(T, H*W, L).cuda()
 
             predlbls = batched_index_select(
-                lbls_base, 1, ids.view(4, -1)).view(T, topk_vis, H, W, L)
+                lbls_base, 1, ids.view(T, -1)).view(T, topk_vis, H, W, L)
             predlbls = (weights.unsqueeze(-1) * predlbls).sum(0).sum(0)
 
             # predlbls /= finput_num
@@ -266,11 +273,10 @@ def test(val_loader, model, epoch, use_cuda):
             vis.image(np.uint8(img_with_heatmap).transpose(2, 0, 1))
             vis.image(np.uint8(predlbls_val).transpose(2, 0, 1))
 
+
     for batch_idx, (imgs_total, imgs_orig, lbl_set, lbls_tensor, lbls_onehot, lbls_resize, meta) in enumerate(val_loader):
         print('******* Vid %s *******', batch_idx)
 
-        if batch_idx > 2: 
-            break
             
         finput_num = n_context
 
@@ -347,17 +353,25 @@ def test(val_loader, model, epoch, use_cuda):
                 dim=-1)
         keys, query = feats[:, :, indices], feats[:, :, n_context:]
 
+        H, W = query.shape[-2:]
+        gx, gy = torch.meshgrid(torch.arange(0, H), torch.arange(0, W))
+        D = ( (gx[None, None, :, :] - gx[:, :, None, None])**2 + (gy[None, None, :, :] - gy[:, :, None, None])**2 ).float() ** 0.5
+        D = (D < args.radius)[None, None].float().cuda()
+
         As = []
         for b in range(0, keys.shape[2], 30):
-            A = torch.einsum('ijklmn,ijkop->iklmnop', keys[:, :, b:b+30], query[:, :, b:b+30]).detach().cpu()
-            As.append(A)
+            A = torch.einsum('ijklmn,ijkop->iklmnop', keys[:, :, b:b+30], query[:, :, b:b+30]).detach()
+            A[0, :, 1:] *= D
+            As.append(A.cpu())
 
-        A = torch.cat(As, dim=1)
+        A = torch.cat(As, dim=1) / args.temperature
         t04 = time.time()
         print(t04-t03, 'model forward')
 
         # import pdb; pdb.set_trace()
 
+        if isinstance(lbl_set, list):
+            lbl_set = torch.Tensor([lbl_set])
         do_label_prop(A[0], lbl_set[0], lbls_resize[0], imgs_toprint, save_path, batch_idx, finput_num,)
 
 
