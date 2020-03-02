@@ -14,6 +14,7 @@ import cv2
 import visdom
 import utils
 
+
 from matplotlib import cm
 color = cm.get_cmap('winter')
 
@@ -45,36 +46,18 @@ class FoldTime(nn.Module):
     def forward(self, x):
         return x.view(x.shape[0] * x.shape[1], *x.shape[2:])
 
-class From3D(nn.Module):
-    def __init__(self, resnet):
-        super(From3D, self).__init__()
-        self.model = resnet
-    
-    def forward(self, x):
-        N, C, T, h, w = x.shape
-        
-        xx = x.permute(0, 2, 1, 3, 4).view(-1, C, h, w)
-        mm = self.model(xx)
-        # import pdb; pdb.set_trace()
 
-        return mm.view(N, T, *mm.shape[-3:]).permute(0, 2, 1, 3, 4)
 
 class TimeCycle(nn.Module):
     def __init__(self, args=None, vis=None):
         super(TimeCycle, self).__init__()
         
-        import torchvision.models.video.resnet as _resnet3d
-        import torchvision.models.resnet as resnet
-        # self.resnet = From3D(resnet.resnet18(pretrained=True))
-        self.resnet = resnet3d.r2d_10(pretrained=False)
+        self.encoder = utils.make_encoder(args.model_type)
 
-        # self.resnet = _resnet3d.r3d_18(pretrained=True)
-        # self.resnet = resnet3d.r2d_18(pretrained=True)
-
-        self.resnet.fc, self.resnet.avgpool, self.resnet.layer4 = None, None, None
         self.infer_dims()
 
         self.selfsim_fc = torch.nn.Linear(self.enc_hid_dim, 128)
+        
         self.selfsim_head = self.make_head([self.enc_hid_dim, 2*self.enc_hid_dim, self.enc_hid_dim])
         self.context_head = self.make_head([self.enc_hid_dim, 2*self.enc_hid_dim, self.enc_hid_dim])
 
@@ -84,11 +67,14 @@ class TimeCycle(nn.Module):
                 m.weight.data.normal_(0, 0.01)
                 m.bias.data.zero_()
 
+        self.edge = getattr(args, 'edgefunc', 'softmax')
+
         # self.kldv = torch.nn.KLDivLoss(reduction="batchmean")
         self.kldv = torch.nn.KLDivLoss(reduction="batchmean")
         self.xent = torch.nn.CrossEntropyLoss(reduction="none")
 
         self.target_temp = 1
+        self.temperature = args.temp
 
         self._xent_targets = {}
         self._kldv_targets = {}
@@ -98,26 +84,29 @@ class TimeCycle(nn.Module):
             self.xent_coef = args.xent_coef
             self.zero_diagonal = args.zero_diagonal
             self.dropout_rate = args.dropout
+            self.featdrop_rate = args.featdrop
         else:
             self.kldv_coef = 0
             self.xent_coef = 0
             self.zero_diagonal = 0
             self.dropout_rate = 0
+            self.featdrop_rate = 0
             
         self.dropout = torch.nn.Dropout(p=self.dropout_rate, inplace=False)
-        
+        self.featdrop = torch.nn.Dropout(p=self.featdrop_rate, inplace=False)
+
         self.viz = visdom.Visdom(port=8095, env='%s_%s' % (args.name if args is not None else 'test', '')) #int(time.time())))
         self.viz.close()
 
         if vis is not None:
             self._viz = vis
-
+    
     def infer_dims(self):
-        # if '2D' in str(type(self.resnet.conv1)):
+        # if '2D' in str(type(self.encoder.conv1)):
         dummy = torch.zeros(1, 3, 1, 224, 224)
         # else:
         #     dummy = torch.Tensor(1, 3, 224, 224)
-        dummy_out = self.resnet(dummy)
+        dummy_out = self.encoder(dummy)
 
         self.enc_hid_dim = dummy_out.shape[1]
 
@@ -129,7 +118,7 @@ class TimeCycle(nn.Module):
         for d1, d2 in zip(dims, dims[1:]):
             h = nn.Conv3d(d1, d2, kernel_size=1, bias=True)
             nn.init.kaiming_normal_(h.weight, mode='fan_out', nonlinearity='relu')
-            head += [h, nn.LeakyReLU(0.1)]
+            head += [h, nn.ReLU()]
 
         head = nn.Sequential(*head)
         return head
@@ -157,8 +146,7 @@ class TimeCycle(nn.Module):
     def compute_affinity(self, x1, x2, do_dropout=True, zero_diagonal=None):
         B, C, N = x1.shape
         # assert x1.shape == x2.shape
-        A = torch.einsum('bcn,bcm->bnm', x1, x2)
-        A = torch.div(A, 1/(C**0.5))
+        A = torch.einsum('bcn,bcm->bnm', self.featdrop(x1), self.featdrop(x2))
         # A = torch.div(A, 1/C**0.5)
 
         if (zero_diagonal is not False) and self.zero_diagonal:
@@ -172,8 +160,14 @@ class TimeCycle(nn.Module):
         A1, A2 = A, A.transpose(1, 2)        
         if do_dropout:
             A1, A2 = self.dropout(A1), self.dropout(A2)
+    
+        if self.edge == 'softmax':
+            A1, A2 = F.softmax(A1/self.temperature, dim=-1), F.softmax(A2/self.temperature, dim=-1)
+        else:
+            if not hasattr(self, 'graph_bias'):
+                self.graph_bias = nn.Parameter((torch.ones(*A.shape[-2:])) * 1e-2).to(next(self.encoder.parameters()).device)
 
-        A1, A2 = F.softmax(A1, dim=-1), F.softmax(A2, dim=-1)
+            A1, A2 = F.normalize(F.relu(A1 + self.graph_bias)**2, dim=-1, p=1), F.normalize(F.relu(A2 + self.graph_bias.transpose(0,1))**2, dim=-1, p=1)
 
         AA = torch.matmul(A2, A1)
         log_AA = torch.log(AA + 1e-20)
@@ -249,7 +243,7 @@ class TimeCycle(nn.Module):
         B, N, C, T, h, w = x.shape
         x = x.reshape(B*N, C, T, h, w) 
 
-        mm = self.resnet(x)
+        mm = self.encoder(x)
         H, W = mm.shape[-2:]
 
         # produce node vector representations by spatially pooling feature maps
@@ -264,8 +258,6 @@ class TimeCycle(nn.Module):
         mm = mm.view(B, N, *mm.shape[1:])
 
         return ff, mm
-
-
 
     def kldv_targets(self, A):
         '''
@@ -321,10 +313,20 @@ class TimeCycle(nn.Module):
         # Assume input is B x T x N*C x H x W        
         B, T, C, H, W = x.shape
         N, C = C//3, 3
-        x = x.transpose(1,2).view(B, N, C, T, H, W)
+
+        if N == 1 and False:
+            import pdb; pdb.set_trace()
+            _sz = 80
+            unfold = torch.nn.Unfold((_sz,_sz), dilation=1, padding=0, stride=((H-_sz)//40, (H-_sz)//40))
+            x = unfold(x.view(B*T, C, H, W))
+            x = x.view(B, T, C, _sz, _sz, x.shape[-1]).permute(0, -1, 2, 1, 3, 4)
+
+            import pdb; pdb.set_trace()
+        else:
+            x = x.transpose(1,2).view(B, N, C, T, H, W)
 
         ff, mm = self.pixels_to_nodes(x)
-
+        
         if just_feats:
             return ff, mm
         B, C, T, N = ff.shape
@@ -356,7 +358,7 @@ class TimeCycle(nn.Module):
                 AAs.append(AA)
 
             # _AA = AA.view(-1, H * W, H, W)
-            if np.random.random() < 0.003:
+            if np.random.random() < 0.03:
                 self.viz.text('%s %s' % (t1, t2), opts=dict(height=1, width=10000), win='div')
                 self.visualize_frame_pair(x, ff, mm, t1, t2)
 

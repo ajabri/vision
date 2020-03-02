@@ -48,7 +48,6 @@ parser.add_argument('-j', '--workers', default=4, type=int, metavar='N',
 parser.add_argument('--resume', default='', type=str, metavar='PATH',
                     help='path to latest checkpoint (default: none)')
 
-
 parser.add_argument('--manualSeed', type=int, help='manual seed')
 parser.add_argument('-e', '--evaluate', dest='evaluate', action='store_true',
                     help='evaluate model on validation set')
@@ -62,24 +61,25 @@ parser.add_argument('--batchSize', default=1, type=int,
 parser.add_argument('--temperature', default=1.0, type=float,
                     help='temperature')
 
-
 parser.add_argument('--topk_vis', default=20, type=int,
                     help='topk_vis')
-
-parser.add_argument('--radius', default=10, type=int,
+parser.add_argument('--radius', default=3, type=float,
                     help='topk_vis')
-
 parser.add_argument('--all-nn', default=False, action='store_true',
                     help='use all as nn')
-
 parser.add_argument('--videoLen', default=4, type=int,
                     help='predict how many frames away')
 
 parser.add_argument('--cropSize', default=320, type=int,
                     help='predict how many frames away')
+parser.add_argument('--outSize', default=640, type=int,
+                    help='size of output mask image')
 
 parser.add_argument('--filelist', default='/scratch/ajabri/data/davis/val2017.txt', type=str)
 parser.add_argument('--save-path', default='./results', type=str)
+
+parser.add_argument('--visdom', default=False, action='store_true')
+parser.add_argument('--server', default='localhost', type=str)
 
 args = parser.parse_args()
 params = {k: v for k, v in args._get_kwargs()}
@@ -98,7 +98,7 @@ args.gpu_id = os.getenv('CUDA_VISIBLE_DEVICES')
 print(args.gpu_id)
 
 import visdom
-vis = visdom.Visdom(port=8095, env='main'); vis.close()
+vis = visdom.Visdom(server=args.server, port=8095, env='main'); vis.close()
 
 
 # Random seed
@@ -172,8 +172,20 @@ def main():
         os.makedirs(args.save_path)
     
     print('\Testing')
-    test_loss = test(val_loader, model, 1, use_cuda)
+    with torch.no_grad():
+        test_loss = test(val_loader, model, 1, use_cuda)
             
+
+def softmax_base(A):
+    if not args.all_nn:
+        N, T, H, W, H, W = A.shape
+        A = A.view(N, T, H*W, H, W)
+        A = torch.nn.functional.softmax(A, dim=-3)
+    else:
+        N, T, H, W, H, W = A.shape
+        A = A.view(N, T*H*W, H, W)
+        A = torch.nn.functional.softmax(A, dim=-3)
+    return A
 
 def test(val_loader, model, epoch, use_cuda):
 
@@ -191,7 +203,7 @@ def test(val_loader, model, epoch, use_cuda):
 
     # Radius mask
     D = None
-    def do_label_prop(A, lbl_set, lbls_resize, imgs_toprint, save_path, batch_idx, finput_num):        
+    def do_label_prop(A, lbl_set, lbls_resize, imgs_toprint, save_path, batch_idx):        
         ##################################################################
         # Label propagation
         ##################################################################
@@ -202,14 +214,6 @@ def test(val_loader, model, epoch, use_cuda):
             (torch.arange(n_context)[None].repeat(nstep, 1) + torch.arange(nstep)[:, None])[:, 1:]
             ], dim=-1)
 
-
-        if not args.all_nn:
-            N, T, H, W, H, W = A.shape
-            A = A.view(N, T, H*W, H, W)
-            A = torch.nn.functional.softmax(A, dim=-3)
-        else:
-            import pdb; pdb.set_trace()
-
         for it in range(nstep):
             if it % 10 == 0:
                 print(it)
@@ -218,35 +222,42 @@ def test(val_loader, model, epoch, use_cuda):
             A_t = A[it].cuda()
 
             # TODO potentially re-softmax???
-            weights, ids = torch.topk(A_t, topk_vis, dim=1)
+            q_dim = 0 if args.all_nn else 1
+            weights, ids = torch.topk(A_t, topk_vis, dim=q_dim)
+
             # weights = torch.nn.functional.softmax(weights, dim=1)
-            weights = torch.nn.functional.normalize(weights, dim=1, p=1)
-            import pdb; pdb.set_trace()   
+            # weights = torch.nn.functional.normalize(weights, dim=q_dim, p=1)
 
             t06 = time.time()
-
-            A_t = A_t.view(A_t.size(0), H, W, H, W)
-
+            # A_t = A_t.view(T, H, W, H, W)
             lbls_base = lbls_resize[indices[it]]
-
             T, H, W, L = lbls_base.shape
-            lbls_base = lbls_base.view(T, H*W, L).cuda()
 
-            predlbls = batched_index_select(
-                lbls_base, 1, ids.view(T, -1)).view(T, topk_vis, H, W, L)
-            predlbls = (weights.unsqueeze(-1) * predlbls).sum(0).sum(0)
-
-            # predlbls /= finput_num
+            if q_dim == 0:
+                lbls_base = lbls_base.view(T*H*W, L).cuda()
+                predlbls = batched_index_select(
+                    lbls_base, 0, ids.view(-1))
+                predlbls = (weights.unsqueeze(-1) * predlbls.view(topk_vis, H, W, L)).sum(0)
+            else:
+                lbls_base = lbls_base.view(T, H*W, L).cuda()
+                predlbls = batched_index_select(
+                    lbls_base, 1, ids.view(T, -1))
+                predlbls = (weights.unsqueeze(-1)/T * predlbls.view(T, topk_vis, H, W, L)).sum(0).sum(0)
 
             img_now = imgs_toprint[it + n_context].permute(1,2,0).numpy() * 255
             print(time.time()-t06, 'lbl proc', t06-t05, 'argsorts')
 
-
             # normalize across pixels?? labels distribution...
+            # import pdb; pdb.set_trace()
             # predlbls -= predlbls.min(0)[0].min(0)[0][None, None]
             # predlbls /= predlbls.max(0)[0].max(0)[0][None, None]
+            # import pdb; pdb.set_trace()
 
-            lbls_resize[it + n_context] = predlbls
+            
+            if it > 0:
+                lbls_resize[it + n_context] = predlbls
+            else:
+                predlbls = lbls_resize[0]
 
             predlbls_cp = predlbls.cpu().numpy().copy()
             predlbls_cp = cv2.resize(predlbls_cp, (params['imgSize'], params['imgSize']))
@@ -256,30 +267,33 @@ def test(val_loader, model, epoch, use_cuda):
 
             predlbls_val = np.array(lbl_set)[np.argmax(predlbls_cp, axis=-1)]
             predlbls_val = predlbls_val.astype(np.uint8)
+
+            # if img_now.shape[0] != args.outSize:
+            #     img_now = cv2.resize(img_now, (args.outSize, args.outSize), interpolation=cv2.INTER_LINEAR)
+
             predlbls_val2 = cv2.resize(predlbls_val, (img_now.shape[0], img_now.shape[1]), interpolation=cv2.INTER_NEAREST)
-
-
-            # import pdb; pdb.set_trace()
 
             # activation_heatmap = cv2.applyColorMap(predlbls, cv2.COLORMAP_JET)
             img_with_heatmap =  np.float32(img_now) * 0.5 + np.float32(predlbls_val2) * 0.5
 
-            imname  = save_path + str(batch_idx) + '_' + str(it + n_context) + '_label.jpg'
-            imname2  = save_path + str(batch_idx) + '_' + str(it + n_context) + '_mask.png'
+            imname  = save_path + str(batch_idx) + '_' + str(it) + '_label.jpg'
+            imname2  = save_path + str(batch_idx) + '_' + str(it) + '_mask.png'
 
             imageio.imwrite(imname, np.uint8(img_with_heatmap))
             imageio.imwrite(imname2, np.uint8(predlbls_val))
 
-            vis.image(np.uint8(img_with_heatmap).transpose(2, 0, 1))
-            vis.image(np.uint8(predlbls_val).transpose(2, 0, 1))
+            if args.visdom:
+                vis.image(np.uint8(img_with_heatmap).transpose(2, 0, 1))
+                vis.image(np.uint8(predlbls_val).transpose(2, 0, 1))
 
+
+    t_vid = 0
 
     for batch_idx, (imgs_total, imgs_orig, lbl_set, lbls_tensor, lbls_onehot, lbls_resize, meta) in enumerate(val_loader):
-        print('******* Vid %s *******', batch_idx)
+        t_vid = time.time()
+        print('******* Vid %s *******' % batch_idx)
 
             
-        finput_num = n_context
-
         # measure data loading time
         imgs_total = imgs_total.cuda()
         bs, total_frame_num, channel_num, height_len, weight_len = imgs_total.shape
@@ -321,8 +335,14 @@ def test(val_loader, model, epoch, use_cuda):
         
         t00 = time.time()
         feats = []
+        nodes = []
+        bsize = 50
+        # for b in range(0, imgs_total.shape[1], bsize):
+        #     node, feat = model.module(imgs_total[b:b+bsize], None, True, func='forward')
+        #     feats.append(feat); nodes.append(node)
+        # feats = torch.cat(feats, dim=1)
+        
         nodes, feats = model.module(imgs_total, None, True, func='forward')
-
         feats = feats.detach().squeeze(1)
         feats = torch.nn.functional.normalize(feats, dim=1)
 
@@ -358,10 +378,16 @@ def test(val_loader, model, epoch, use_cuda):
         D = ( (gx[None, None, :, :] - gx[:, :, None, None])**2 + (gy[None, None, :, :] - gy[:, :, None, None])**2 ).float() ** 0.5
         D = (D < args.radius)[None, None].float().cuda()
 
+        # import pdb; pdb.set_trace()
+
         As = []
-        for b in range(0, keys.shape[2], 30):
-            A = torch.einsum('ijklmn,ijkop->iklmnop', keys[:, :, b:b+30], query[:, :, b:b+30]).detach()
+        bsize = 10
+        for b in range(0, keys.shape[2], bsize):
+
+            A = torch.einsum('ijklmn,ijkop->iklmnop', keys[:, :, b:b+bsize], query[:, :, b:b+bsize]).detach()
             A[0, :, 1:] *= D
+            A = softmax_base(A[0])[None]
+            # As.append(A)
             As.append(A.cpu())
 
         A = torch.cat(As, dim=1) / args.temperature
@@ -371,8 +397,13 @@ def test(val_loader, model, epoch, use_cuda):
         # import pdb; pdb.set_trace()
 
         if isinstance(lbl_set, list):
-            lbl_set = torch.Tensor([lbl_set])
-        do_label_prop(A[0], lbl_set[0], lbls_resize[0], imgs_toprint, save_path, batch_idx, finput_num,)
+            lbl_set = torch.cat(lbl_set)[None]
+        
+        # import pdb; pdb.set_trace()
+        lbls_resize[0, n_context*2 - 1:] *= 0
+        do_label_prop(A[0], lbl_set[0], lbls_resize[0], imgs_toprint, save_path, batch_idx)
+
+        print('******* Vid %s TOOK %s *******' % (batch_idx, time.time() - t_vid))
 
 
     converted_path = "%s_converted/" % args.save_path[:-1]
@@ -382,7 +413,7 @@ def test(val_loader, model, epoch, use_cuda):
     python %s-2017/python/tools/eval.py -i %s -o %s/results.yaml --year 2017 --phase val \
     | tee %s/output.txt & """ % (args.save_path, converted_path, data_path, data_path, converted_path, converted_path, converted_path)
 
-    import pdb; pdb.set_trace()
+    # import pdb; pdb.set_trace()
 
 # python davis/convert_davis.py --in_folder results/ --out_folder results_converted/ --dataset /scratch/ajabri/data/davis/ &&     python /scratch/ajabri/data/davis-2017/python/tools/eval.py -i results_converted/ -o results_converted//results.yaml --year 2017 --phase val     | tee results_converted//output.txt &
 

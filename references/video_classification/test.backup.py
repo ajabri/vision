@@ -426,7 +426,7 @@ def test(val_loader, model, epoch, use_cuda):
             t07 = time.time()
             # print(t07-t06, 'lbl proc', t06-t05, 'argsorts')
 
-            predlbls = predlbls / finput_num
+            # predlbls = predlbls / finput_num
 
             for t in range(len(lbl_set)):
                 nowt = t

@@ -464,7 +464,7 @@ def nn_patches(vis, P, A_k, prefix='', N=10, K=20):
     for n,i in enumerate(np.random.permutation(P.shape[0])[:N]):
         p = P[i]
         vis.text('', opts=dict(width=10000, height=1), win='%s_patch_header_%s' % (prefix, n))
-        vis.image(p,  win='%s_patch_query_%s' % (prefix, n))
+        # vis.image(p,  win='%s_patch_query_%s' % (prefix, n))
 
         for k in range(I.shape[0]):
             vis.images(P[I[k, i, :K]], nrow=min(I.shape[-1], 20), win='%s_patch_values_%s_%s' % (prefix, n, k))
@@ -478,18 +478,23 @@ def unnormalize(x):
     )
     return t(x)
 
-def n_patches(x, transform, shape=(64, 64, 3), scale=[0.2, 0.8]):
+def n_patches(x, n, transform, shape=(64, 64, 3), scale=[0.2, 0.8]):
+
+    if shape[-1] == 0:
+        shape = np.random.uniform(64, 128)
+        shape = (shape, shape, 3)
+
     crop = transforms.Compose([
-        lambda x: PIL.Image.fromarray(x),
-        transforms.RandomResizedCrop(shape[0], scale=size_range)
+        lambda x: PIL.Image.fromarray(x) if not 'PIL' in str(type(x)) else x,
+        transforms.RandomResizedCrop(shape[0], scale=scale)
     ])    
 
     if torch.is_tensor(x):
         x = x.numpy().transpose(1,2, 0)
     
     P = []
-    for _ in range(args.npatch):
-        xx = transform(x)
+    for _ in range(n):
+        xx = transform(crop(x))
         P.append(xx)
 
 
@@ -514,11 +519,12 @@ def patch_grid(x, transform, shape=(64, 64, 3), stride=[1.0, 1.0]):
     winds = winds.reshape(-1, *winds.shape[-3:])
 
     # import pdb; pdb.set_trace()
-
     # winds = torch.from_numpy(winds).contiguous().view(-1, *winds.shape[-3:])
     # patches = sklearn.feature_extraction.image.extract_patches_2d(x, shape[1:], 0.0002)
 
     P = [transform(spatial_jitter(w)) for w in winds]
+
+    # import pdb; pdb.set_trace()
 
     return torch.cat(P, dim=0)
 
@@ -547,7 +553,7 @@ def get_frame_aug(args):
             return patch_grid(x, transform=train_transform,
                 shape=args.patch_size, stride=args.pstride)
         elif 'randpatch' in args.frame_aug:
-            return n_patches(x, transform=train_transform,
+            return n_patches(x, args.npatch, transform=train_transform,
                 shape=args.patch_size, scale=args.npatch_scale)
         else:
             return train_transform(x)
@@ -561,7 +567,7 @@ def get_frame_transform(args):
     norm_size = torchvision.transforms.Resize((imsz, imsz))
 
     tt = []
-    fts = args.frame_transforms.split(',')
+    fts = args.frame_transforms#.split(',')
 
     # torchvision.transforms.RandomAffine(degrees, translate=None, scale=None, shear=None, resample=False, fillcolor=0),
     # torchvision.transforms.RandomGrayscale(p=0.1)
@@ -578,7 +584,7 @@ def get_frame_transform(args):
 
     if 'crop' in fts:
         tt.append(torchvision.transforms.RandomResizedCrop(
-            imsz, scale=(0.6, 0.9), ratio=(0.7, 1.3), interpolation=2),)
+            imsz, scale=(0.8, 0.95), ratio=(0.7, 1.3), interpolation=2),)
     else:
         tt.append(norm_size)
 
@@ -697,3 +703,60 @@ def draw_hsv(flow):
     hsv[...,2] = np.minimum(v*4, 255)
     bgr = cv2.cvtColor(hsv, cv2.COLOR_HSV2BGR)#[::-1]
     return bgr
+
+
+
+
+### Network Utils
+
+import cmc_resnet
+
+def load_selfsup_model():
+    r50 = cmc_resnet.InsResNet50()
+    r50.load_state_dict(torch.load('/home/jabreezus/clones/CMC/models/MoCo_softmax_16384_epoch200.pth')['model'])
+    return r50
+
+
+class From3D(nn.Module):
+    def __init__(self, resnet):
+        super(From3D, self).__init__()
+        self.model = resnet
+    
+    def forward(self, x):
+        N, C, T, h, w = x.shape
+        
+        xx = x.permute(0, 2, 1, 3, 4).contiguous().view(-1, C, h, w)
+        mm = self.model(xx)
+        # import pdb; pdb.set_trace()
+
+        return mm.view(N, T, *mm.shape[-3:]).permute(0, 2, 1, 3, 4)
+
+
+
+def make_encoder(model_type='scratch'):
+    import resnet3d
+    import resnet2d
+
+    if model_type == 'scratch':
+        import torchvision.models.video.resnet as _resnet3d
+        # resnet = resnet3d.r2d_10(pretrained=False)
+        resnet = resnet2d.resnet18(pretrained=False,)
+        #     norm_layer=lambda x: nn.GroupNorm(1, x))
+        # resnet = resnet2d.resnet34(pretrained=False,)        
+
+    elif model_type == 'imagenet':
+        resnet2d._REFLECT_PAD = False
+        resnet = resnet2d.resnet18(pretrained=True)
+
+    elif model_type == 'moco':
+        resnet = load_selfsup_model().encoder
+
+        # self.resnet = _resnet3d.r3d_18(pretrained=True)
+        # self.resnet = resnet3d.r2d_18(pretrained=True)
+
+    resnet.fc, resnet.avgpool, resnet.layer4 = None, None, None
+
+    if 'Conv2d' in str(resnet):
+        resnet = From3D(resnet)
+
+    return resnet

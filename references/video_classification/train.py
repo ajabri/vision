@@ -220,9 +220,14 @@ def main(args):
     criterion = nn.CrossEntropyLoss()
 
     lr = args.lr * args.world_size
-    # optimizer = torch.optim.SGD(
-    #     model.parameters(), lr=lr, momentum=args.momentum, weight_decay=args.weight_decay)
-    optimizer = torch.optim.Adam(model.parameters(), lr=3e-4)
+
+    if args.optim == 'sgd':
+        optimizer = torch.optim.SGD(
+            model.parameters(), lr=lr, momentum=args.momentum, weight_decay=args.weight_decay)
+    else:
+        assert args.optim == 'adam'
+        optimizer = torch.optim.Adam(model.parameters(), lr=3e-4)
+
     if args.apex:
         model, optimizer = amp.initialize(model, optimizer, opt_level=args.apex_opt_level )
 
@@ -368,6 +373,16 @@ def parse_args():
         type=float, help='random sample patchify stride from [this*patch_size, patch_size]')
     parser.add_argument('--npatch-scale', default=[0.2, 0.8], nargs=2,
         type=float, help='range from which to same patch sizes for random patch sampling')
+    parser.add_argument('--edgefunc', default='relu', type=str, help='')
+
+    parser.add_argument('--model-type', default='scratch', type=str, help='scratch | imagenet | moco')
+    parser.add_argument('--optim', default='adam', type=str, help='adam | sgd')
+
+    parser.add_argument('--temp', default=0.08,
+        type=float, help='softmax temperature when computing affinity')
+
+    parser.add_argument('--featdrop', default=0.0,
+        type=float, help='dropout on features')
 
     args = parser.parse_args()
 
@@ -378,8 +393,8 @@ def parse_args():
 
     if args.output_dir == 'auto':
         args.dataset = 'kinetics' if 'kinetics' in args.data_path else 'pennaction'
-        keys = ['dataset', 'xent_coef', 'kldv_coef', 'dropout', 'clip_len', 'frame_transforms', 'frame_aug', 'zero_diagonal', 'npatch', 'nrel', 'pstride']
-        name = '-'.join(["%s:%s" % (k, getattr(args, k)) for k in keys])
+        keys = ['dataset', 'dropout', 'clip_len', 'frame_transforms', 'frame_aug', 'zero_diagonal', 'npatch', 'nrel', 'pstride', 'edgefunc', 'optim', 'temp', 'featdrop']
+        name = '_'.join(["%s%s" % (k, getattr(args, k)) for k in keys])
         args.output_dir = "checkpoints/%s_%s/" % (args.name, name)
 
         import datetime
