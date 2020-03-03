@@ -51,8 +51,26 @@ class FoldTime(nn.Module):
 class TimeCycle(nn.Module):
     def __init__(self, args=None, vis=None):
         super(TimeCycle, self).__init__()
+
+        if args is not None:
+            self.kldv_coef = args.kldv_coef
+            self.xent_coef = args.xent_coef
+            self.zero_diagonal = args.zero_diagonal
+            self.dropout_rate = args.dropout
+            self.featdrop_rate = args.featdrop
+            self.model_type = args.model_type
+            self.temperature = args.temp
+        else:
+            self.kldv_coef = 0
+            self.xent_coef = 0
+            self.zero_diagonal = 0
+            self.dropout_rate = 0
+            self.featdrop_rate = 0
+            self.model_type = 'scratch'
+            self.temperature = 1
+
         
-        self.encoder = utils.make_encoder(args.model_type)
+        self.encoder = utils.make_encoder(self.model_type)
 
         self.infer_dims()
 
@@ -74,23 +92,10 @@ class TimeCycle(nn.Module):
         self.xent = torch.nn.CrossEntropyLoss(reduction="none")
 
         self.target_temp = 1
-        self.temperature = args.temp
 
         self._xent_targets = {}
         self._kldv_targets = {}
         
-        if args is not None:
-            self.kldv_coef = args.kldv_coef
-            self.xent_coef = args.xent_coef
-            self.zero_diagonal = args.zero_diagonal
-            self.dropout_rate = args.dropout
-            self.featdrop_rate = args.featdrop
-        else:
-            self.kldv_coef = 0
-            self.xent_coef = 0
-            self.zero_diagonal = 0
-            self.dropout_rate = 0
-            self.featdrop_rate = 0
             
         self.dropout = torch.nn.Dropout(p=self.dropout_rate, inplace=False)
         self.featdrop = torch.nn.Dropout(p=self.featdrop_rate, inplace=False)
@@ -339,6 +344,20 @@ class TimeCycle(nn.Module):
         t_pairs = list(itertools.combinations(range(T), 2))
         L = len(t_pairs)
 
+
+
+        # import pdb; pdb.set_trace()
+        if np.random.random() < 0.1:
+            if x.device.index == 0:
+                for i in range(B):
+                    pg_win = 'patchgraph_%s'%i
+                    if not self.viz.win_exists(pg_win, env=self.viz.env+'_pg'):
+                        tviz = 0
+                        self.viz.clear_event_handlers(pg_win)
+                        A, AA, log_AA, A12, A21 = self.compute_affinity(ff[i:i+1, :, tviz], ff[i:i+1, :, tviz])
+                        pg = utils.PatchGraph(self.viz, x[i, :, :, tviz], A[0], win=pg_win)
+                        # import pdb; pdb.set_trace()
+
         for (t1, t2) in t_pairs:
             f1, f2 = ff[:, :, t1], ff[:, :, t2]
 
@@ -358,7 +377,7 @@ class TimeCycle(nn.Module):
                 AAs.append(AA)
 
             # _AA = AA.view(-1, H * W, H, W)
-            if np.random.random() < 0.03:
+            if np.random.random() < 0.02:
                 self.viz.text('%s %s' % (t1, t2), opts=dict(height=1, width=10000), win='div')
                 self.visualize_frame_pair(x, ff, mm, t1, t2)
 
@@ -389,7 +408,6 @@ class TimeCycle(nn.Module):
 
             utils.nn_patches(self.viz, all_x, all_A[None])
 
-
-        return ff, self.xent_coef * (xents/L), self.kldv_coef * (kldvs/L), diags
+        return ff, self.xent_coef * (xents.unsqueeze(0)/L), self.kldv_coef * (kldvs.unsqueeze(0)/L), diags
 
 

@@ -80,6 +80,7 @@ parser.add_argument('--save-path', default='./results', type=str)
 
 parser.add_argument('--visdom', default=False, action='store_true')
 parser.add_argument('--server', default='localhost', type=str)
+parser.add_argument('--model-type', default='scratch', type=str)
 
 args = parser.parse_args()
 params = {k: v for k, v in args._get_kwargs()}

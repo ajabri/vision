@@ -373,7 +373,7 @@ def parse_args():
         type=float, help='random sample patchify stride from [this*patch_size, patch_size]')
     parser.add_argument('--npatch-scale', default=[0.2, 0.8], nargs=2,
         type=float, help='range from which to same patch sizes for random patch sampling')
-    parser.add_argument('--edgefunc', default='relu', type=str, help='')
+    parser.add_argument('--edgefunc', default='softmax', type=str, help='softmax | relu')
 
     parser.add_argument('--model-type', default='scratch', type=str, help='scratch | imagenet | moco')
     parser.add_argument('--optim', default='adam', type=str, help='adam | sgd')

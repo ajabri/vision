@@ -406,6 +406,114 @@ def make_gif(video, outname='/tmp/test.gif', sz=256):
     io.mimsave(outname, video, duration = 0.2)
 
 
+from matplotlib import cm
+import time
+import cv2
+
+class PatchGraph(object):
+    
+    color = cm.get_cmap('jet')
+    pad = 2
+    
+    def blend(self, i):
+        img = (0.5 * self.maps[i] + 0.5 * self.grid[...,:-self.pad, :-self.pad]).numpy() * 255.0
+        y, x = i // self.W, i % self.W
+        ctr = (int((self.w + self.pad) * (x  + 0.5)), int((self.h + self.pad) * (y  + 0.5)))
+
+        img = cv2.circle(img.transpose(1,2,0), ctr, 10, (255, 255, 255), -1).get().transpose(2, 0, 1)
+
+        return img
+        
+    def __init__(self, viz, I, A, win='patchgraph'):
+        self._win = win
+
+        self._birth = time.time()
+        N, C, h, w = I.shape
+        H = W = int(N ** 0.5)
+        self.N, self.H, self.W, self.h, self.w = N, H, W, h, w
+
+        A = A.view(H * W, H, W).transpose(-1, -2)
+
+        self.grid = torchvision.utils.make_grid(I, nrow=H, padding=self.pad, pad_value=0).cpu()
+        self.grid -= self.grid.min()
+        self.grid /= self.grid.max()
+
+        big_A = [cv2.resize(aa, (H*(h+self.pad), W*(w+self.pad)), interpolation=cv2.INTER_NEAREST) for aa in A[:, :, :, None].cpu().detach().numpy()]
+        maps = [self.color(_a)[...,:3] for _a in big_A]
+        self.maps = torch.from_numpy(np.array(maps)).transpose(1, -1)
+
+        self.curr_id = N//2
+        self.curr = self.blend(self.curr_id)
+
+        # viz.text('', opts=dict(width=10000, height=2), env=viz.env+'_pg')
+        self.win_id = win_id = viz.image(self.curr, win=self._win, env=viz.env+'_pg')
+        # self.win_id_text = win_id_text = viz.text('', env=viz.env+'_pg')
+        
+        def str2inttuple(s):
+            try:
+                ss = s.split(',')
+                assert(len(ss) == 2)
+                return int(ss[0]), int(ss[1])
+            except:
+                return False
+
+        def callback(event):
+            nonlocal win_id #, win_id_text
+            # print(event['event_type'])
+
+            #TODO make the enter key recompute the A under a
+            if event['event_type'] == 'KeyPress':
+                # print(event['key'], 'KEYYYYY')
+
+                if 'Arrow' in event['key']:
+                    self.curr_id += {'ArrowLeft':-1, 'ArrowRight': 1, 'ArrowUp': -self.W, 'ArrowDown': self.W}[event['key']]
+                    # print('hello!!', self.curr_id)
+                    self.curr_id = min(max(self.curr_id, 0), N)
+                    self.curr = self.blend(self.curr_id)
+                    viz.image(self.curr, win=self.win_id, env=viz.env+'_pg')
+
+                # curr_txt = event['pane_data']['content']
+
+                # print(event['key'], 'KEYYYYY')
+                # if event['key'] == 'Enter':
+                #     itup = str2inttuple(curr_txt)
+                #     if itup:
+                #         self.curr = self.blend(itup[0]*H + itup[1])
+                #         viz.image(self.curr, win=self.win_id, env=viz.env+'_pg')
+                #         curr_txt='Set %s' % curr_txt
+                #     else:
+                #         curr_txt='Invalid position tuple'
+
+                # elif event['key'] == 'Backspace':
+                #     curr_txt = curr_txt[:-1]
+                # elif event['key'] == 'Delete':
+                #     curr_txt = ''
+                # elif len(event['key']) == 1:
+                #     curr_txt += event['key']
+                
+
+                # viz.text(curr_txt, win=self.win_id_text, env=viz.env+'_pg')
+
+            if event['event_type'] == 'Click':
+                # print(event.keys())
+                # import pdb; pdb.set_trace()
+                # viz.text(event)
+                coords = "x: {}, y: {};".format(
+                    event['image_coord']['x'], event['image_coord']['y']
+                )
+                viz.text(coords, win=self.win_id_text, env=viz.env+'_pg')
+
+                self.curr = self.blend(np.random.randint(N))
+
+                viz.image(self.curr, win=self.win_id, env=viz.env+'_pg')
+
+
+        viz.register_event_handler(callback, self.win_id)
+        # viz.register_event_handler(callback, self.win_id_text)
+        # import pdb; pdb.set_trace()
+
+    
+
 
 class Visualize(object):
     def __init__(self, args, suffix='metrics', log_interval=2*60):
@@ -444,6 +552,8 @@ class Visualize(object):
 
     def nn_patches(self, P, A_k, prefix='', N=10, K=20):
         nn_patches(self.vis, P, A_k, prefix, N, K)
+
+
 
 def nn_patches(vis, P, A_k, prefix='', N=10, K=20):
     # produces nearest neighbor visualization of N patches given an affinity matrix with K channels
