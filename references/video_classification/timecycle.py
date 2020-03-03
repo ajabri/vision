@@ -310,7 +310,7 @@ class TimeCycle(nn.Module):
         else:
             return 0
 
-    def forward(self, x, orig=None, just_feats=False):
+    def forward(self, x, orig=None, just_feats=False, visualize=False):
         xents = torch.tensor([0.]).cuda()
         kldvs = torch.tensor([0.]).cuda()
         diags = dict(skip_accur=torch.tensor([0.]).cuda())
@@ -347,7 +347,7 @@ class TimeCycle(nn.Module):
 
 
         # import pdb; pdb.set_trace()
-        if np.random.random() < 0.1:
+        if np.random.random() < 0.1 or visualize:
             if x.device.index == 0:
                 for i in range(B):
                     pg_win = 'patchgraph_%s'%i
@@ -377,7 +377,7 @@ class TimeCycle(nn.Module):
                 AAs.append(AA)
 
             # _AA = AA.view(-1, H * W, H, W)
-            if np.random.random() < 0.02:
+            if np.random.random() < 0.02 or visualize:
                 self.viz.text('%s %s' % (t1, t2), opts=dict(height=1, width=10000), win='div')
                 self.visualize_frame_pair(x, ff, mm, t1, t2)
 
@@ -398,7 +398,7 @@ class TimeCycle(nn.Module):
             diags['xent cyc %s' % str(i)] = xent_loss.mean().detach()
 
 
-        if np.random.random() < 0.01:
+        if np.random.random() < 0.01 or visualize:
             # all patches
             all_x = x.permute(0, 3, 1, 2, 4, 5)
             all_x = all_x.reshape(-1, *all_x.shape[-3:])

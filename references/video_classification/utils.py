@@ -416,11 +416,12 @@ class PatchGraph(object):
     pad = 2
     
     def blend(self, i):
-        img = (0.5 * self.maps[i] + 0.5 * self.grid[...,:-self.pad, :-self.pad]).numpy() * 255.0
+        img = (0.5 * self.maps[i] + 0.5 * self.grid[...,:-self.pad, :-self.pad]).copy() * 255
         y, x = i // self.W, i % self.W
-        ctr = (int((self.w + self.pad) * (x  + 0.5)), int((self.h + self.pad) * (y  + 0.5)))
+        cx, cy = [int((self.w + self.pad) * (x  + 0.5)), int((self.h + self.pad) * (y  + 0.5))]
 
-        img = cv2.circle(img.transpose(1,2,0), ctr, 10, (255, 255, 255), -1).get().transpose(2, 0, 1)
+        img[:, cy-5:cy+5, cx-5:cx+5] = 255
+        # img = cv2.circle(img.transpose(1,2,0), ctr, 10, (255, 255, 255), -1).get().transpose(2, 0, 1)
 
         return img
         
@@ -434,13 +435,13 @@ class PatchGraph(object):
 
         A = A.view(H * W, H, W).transpose(-1, -2)
 
-        self.grid = torchvision.utils.make_grid(I, nrow=H, padding=self.pad, pad_value=0).cpu()
+        self.grid = torchvision.utils.make_grid(I, nrow=H, padding=self.pad, pad_value=0).cpu().numpy()
         self.grid -= self.grid.min()
         self.grid /= self.grid.max()
 
         big_A = [cv2.resize(aa, (H*(h+self.pad), W*(w+self.pad)), interpolation=cv2.INTER_NEAREST) for aa in A[:, :, :, None].cpu().detach().numpy()]
         maps = [self.color(_a)[...,:3] for _a in big_A]
-        self.maps = torch.from_numpy(np.array(maps)).transpose(1, -1)
+        self.maps = torch.from_numpy(np.array(maps)).transpose(1, -1).numpy()
 
         self.curr_id = N//2
         self.curr = self.blend(self.curr_id)
@@ -512,8 +513,6 @@ class PatchGraph(object):
         # viz.register_event_handler(callback, self.win_id_text)
         # import pdb; pdb.set_trace()
 
-    
-
 
 class Visualize(object):
     def __init__(self, args, suffix='metrics', log_interval=2*60):
@@ -522,7 +521,6 @@ class Visualize(object):
             server='http://%s' % args.server,
             env="%s_%s" % (args.name, suffix),
         )
-        
         self.data = dict()
 
         self.log_interval = log_interval

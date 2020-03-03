@@ -24,7 +24,25 @@ try:
 except ImportError:
     amp = None
 
+def visualize(model, data_loader, device, vis=None):
 
+    header = 'Visualizing'
+    for video, orig in metric_logger.log_every(data_loader, print_freq, header):
+        start_time = time.time()
+
+        video = video.to(device)
+        output, xent_loss, kldv_loss, diagnostics = model(video, orig=orig, visualize=True)
+        loss = (xent_loss.mean() + kldv_loss.mean())
+
+        input()
+        
+        # if vis is not None and np.random.random() < 0.01:
+        #     vis.log('xent_loss', xent_loss.mean().item())
+        #     vis.log('kldv_loss', kldv_loss.mean().item())
+        #     for k,v in diagnostics.items():
+        #         vis.log(k, v.mean().item())
+
+        
 def train_one_epoch(model, criterion, optimizer, lr_scheduler, data_loader, device, epoch, print_freq,
     apex=False, vis=None, checkpoint_fn=None):
 
@@ -226,7 +244,7 @@ def main(args):
             model.parameters(), lr=lr, momentum=args.momentum, weight_decay=args.weight_decay)
     else:
         assert args.optim == 'adam'
-        optimizer = torch.optim.Adam(model.parameters(), lr=3e-4)
+        optimizer = torch.optim.Adam(model.parameters(), lr=lr)
 
     if args.apex:
         model, optimizer = amp.initialize(model, optimizer, opt_level=args.apex_opt_level )
@@ -254,6 +272,10 @@ def main(args):
         optimizer.load_state_dict(checkpoint['optimizer'])
         lr_scheduler.load_state_dict(checkpoint['lr_scheduler'])
         args.start_epoch = checkpoint['epoch'] + 1
+
+    if args.visualize:
+        visualize(model, data_loader, device, vis=vis)
+        return
 
     if args.test_only:
         evaluate(model, criterion, data_loader_test, device=device)
@@ -308,7 +330,7 @@ def parse_args():
                         help='number of total epochs to run')
     parser.add_argument('-j', '--workers', default=10, type=int, metavar='N',
                         help='number of data loading workers (default: 16)')
-    parser.add_argument('--lr', default=0.01, type=float, help='initial learning rate')
+    parser.add_argument('--lr', default=3e-4, type=float, help='initial learning rate')
     parser.add_argument('--momentum', default=0.9, type=float, metavar='M',
                         help='momentum')
     parser.add_argument('--wd', '--weight-decay', default=1e-4, type=float,
@@ -383,6 +405,9 @@ def parse_args():
 
     parser.add_argument('--featdrop', default=0.0,
         type=float, help='dropout on features')
+
+    parser.add_argument('--visualize', default=False,
+        action='store_true', help='visualize trained model')
 
     args = parser.parse_args()
 
