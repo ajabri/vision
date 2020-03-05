@@ -51,6 +51,8 @@ class FoldTime(nn.Module):
 class TimeCycle(nn.Module):
     def __init__(self, args=None, vis=None):
         super(TimeCycle, self).__init__()
+        
+        self.args = args
 
         if args is not None:
             self.kldv_coef = args.kldv_coef
@@ -249,7 +251,21 @@ class TimeCycle(nn.Module):
         x = x.reshape(B*N, C, T, h, w) 
 
         mm = self.encoder(x)
+
+        _mm = torch.flatten(mm.transpose(1,2), start_dim=0, end_dim=1)
+        mm = nn.functional.dropout2d(_mm, p=self.featdrop_rate).view(B, T, *_mm.shape[1:]).transpose(1, 2)
+
         H, W = mm.shape[-2:]
+
+        # import pdb; pdb.set_trace()
+
+        if N == 1:  # encode 1 image into feature map, use those vecs as nodes
+            mm = mm.permute(0, -2, -1, 1, 2).contiguous()
+            mm = mm.view(-1, *mm.shape[3:])[..., None, None]
+            N = mm.shape[0] // B
+            H, W = 1, 1
+        
+        # import pdb; pdb.set_trace()
 
         # produce node vector representations by spatially pooling feature maps
         ff = mm.sum(-1).sum(-1) / (H*W)
@@ -261,6 +277,8 @@ class TimeCycle(nn.Module):
         # reshape to add back batch and num node dimensions
         ff = ff.view(B, N, ff.shape[1], T).permute(0, 2, 3, 1)
         mm = mm.view(B, N, *mm.shape[1:])
+
+        # import pdb; pdb.set_trace()
 
         return ff, mm
 
@@ -317,21 +335,35 @@ class TimeCycle(nn.Module):
 
         # Assume input is B x T x N*C x H x W        
         B, T, C, H, W = x.shape
-        N, C = C//3, 3
+        _N, C = C//3, 3
 
-        if N == 1 and False:
-            import pdb; pdb.set_trace()
-            _sz = 80
-            unfold = torch.nn.Unfold((_sz,_sz), dilation=1, padding=0, stride=((H-_sz)//40, (H-_sz)//40))
-            x = unfold(x.view(B*T, C, H, W))
-            x = x.view(B, T, C, _sz, _sz, x.shape[-1]).permute(0, -1, 2, 1, 3, 4)
+        if _N == 1 and visualize:
+            # patchify with unfold
+            _sz, res = 80, 10
+            stride = utils.get_stride(H, _sz, res)
+            B, C, H, W = orig.shape
 
-            import pdb; pdb.set_trace()
+            unfold = torch.nn.Unfold((_sz,_sz), dilation=1, padding=0, stride=(stride, stride))
+            x = unfold(orig.view(B, C, H, W))
+            x = x.view(B, 1, C, _sz, _sz, x.shape[-1]).permute(0, -1, 2, 1, 3, 4)
+            # x = x.cuda()
+
+            ff, mm = [], []
+            _bsz = 100
+            for i in range(0, x.shape[1], _bsz):
+                fff, mmm = self.pixels_to_nodes(x[:, i:i+_bsz].cuda())
+                ff.append(fff)
+                mm.append(mmm)
+
+            ff = torch.cat(ff, dim=-1)
+            mm = torch.cat(mm, dim=1)
+
+            # import pdb; pdb.set_trace()
         else:
-            x = x.transpose(1,2).view(B, N, C, T, H, W)
-
-        ff, mm = self.pixels_to_nodes(x)
+            x = x.transpose(1,2).view(B, _N, C, T, H, W)
+            ff, mm = self.pixels_to_nodes(x)
         
+        # import pdb; pdb.set_trace()
         if just_feats:
             return ff, mm
         B, C, T, N = ff.shape
@@ -344,61 +376,61 @@ class TimeCycle(nn.Module):
         t_pairs = list(itertools.combinations(range(T), 2))
         L = len(t_pairs)
 
-
-
-        # import pdb; pdb.set_trace()
         if np.random.random() < 0.1 or visualize:
-            if x.device.index == 0:
+            if ff.device.index == 0:
                 for i in range(B):
                     pg_win = 'patchgraph_%s'%i
-                    if not self.viz.win_exists(pg_win, env=self.viz.env+'_pg'):
+                    # print('exists', self.viz.win_exists(pg_win, env=self.viz.env+'_pg'))
+                    if not self.viz.win_exists(pg_win, env=self.viz.env+'_pg') or visualize:
                         tviz = 0
                         self.viz.clear_event_handlers(pg_win)
                         A, AA, log_AA, A12, A21 = self.compute_affinity(ff[i:i+1, :, tviz], ff[i:i+1, :, tviz])
-                        pg = utils.PatchGraph(self.viz, x[i, :, :, tviz], A[0], win=pg_win)
+                        pg = utils.PatchGraph(self.viz, x[i, :, :, tviz], A[0], win=pg_win, orig=orig)
                         # import pdb; pdb.set_trace()
 
-        for (t1, t2) in t_pairs:
-            f1, f2 = ff[:, :, t1], ff[:, :, t2]
+        if len(t_pairs) > 0:
 
-            A, AA, log_AA, A12, A21 = self.compute_affinity(f1, f2)
-            log_AA = log_AA.view(-1, log_AA.shape[-1])
+            for (t1, t2) in t_pairs:
+                f1, f2 = ff[:, :, t1], ff[:, :, t2]
 
-            xent_loss, acc = self.compute_xent_loss(A, log_AA)
-            kldv_loss = self.compute_kldv_loss(A, log_AA)
+                A, AA, log_AA, A12, A21 = self.compute_affinity(f1, f2)
+                log_AA = log_AA.view(-1, log_AA.shape[-1])
 
-            xents += xent_loss
-            kldvs += kldv_loss
-            diags['skip_accur'] += acc/L
+                xent_loss, acc = self.compute_xent_loss(A, log_AA)
+                kldv_loss = self.compute_kldv_loss(A, log_AA)
 
-            if (t2 - t1) == 1:
-                A12s.append(A12)
-                A21s.append(A21)
-                AAs.append(AA)
+                xents += xent_loss
+                kldvs += kldv_loss
+                diags['skip_accur'] += acc/L
 
-            # _AA = AA.view(-1, H * W, H, W)
-            if np.random.random() < 0.02 or visualize:
-                self.viz.text('%s %s' % (t1, t2), opts=dict(height=1, width=10000), win='div')
-                self.visualize_frame_pair(x, ff, mm, t1, t2)
+                if (t2 - t1) == 1:
+                    A12s.append(A12)
+                    A21s.append(A21)
+                    AAs.append(AA)
 
-
-        # longer cycle:
-        a12, a21 = A12s[0], A21s[0]
-        for i in range(1, len(A12s)):
-            a12, a21 = torch.matmul(A12s[i], a12), torch.matmul(a21, A21s[i])
-            aa = torch.matmul(a21, a12)
-            log_aa = torch.log(aa + 1e-20).view(-1, aa.shape[-1])
-
-            xent_loss, acc = self.compute_xent_loss(aa, log_aa)
-            kldv_loss = self.compute_kldv_loss(aa, log_aa)
-
-            xents += xent_loss
-            kldvs += kldv_loss
-            diags['acc cyc %s' % str(i)] = acc
-            diags['xent cyc %s' % str(i)] = xent_loss.mean().detach()
+                # _AA = AA.view(-1, H * W, H, W)
+                if np.random.random() < 0.02 or visualize:
+                    self.viz.text('%s %s' % (t1, t2), opts=dict(height=1, width=10000), win='div')
+                    self.visualize_frame_pair(x, ff, mm, t1, t2)
 
 
-        if np.random.random() < 0.01 or visualize:
+            # longer cycle:
+            a12, a21 = A12s[0], A21s[0]
+            for i in range(1, len(A12s)):
+                a12, a21 = torch.matmul(A12s[i], a12), torch.matmul(a21, A21s[i])
+                aa = torch.matmul(a21, a12)
+                log_aa = torch.log(aa + 1e-20).view(-1, aa.shape[-1])
+
+                xent_loss, acc = self.compute_xent_loss(aa, log_aa)
+                kldv_loss = self.compute_kldv_loss(aa, log_aa)
+
+                xents += xent_loss
+                kldvs += kldv_loss
+                diags['acc cyc %s' % str(i)] = acc
+                diags['xent cyc %s' % str(i)] = xent_loss.mean().detach()
+
+
+        if _N > 1 and (np.random.random() < 0.01 or visualize):
             # all patches
             all_x = x.permute(0, 3, 1, 2, 4, 5)
             all_x = all_x.reshape(-1, *all_x.shape[-3:])

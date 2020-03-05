@@ -27,13 +27,15 @@ except ImportError:
 def visualize(model, data_loader, device, vis=None):
 
     header = 'Visualizing'
-    for video, orig in metric_logger.log_every(data_loader, print_freq, header):
+    for i, (video, orig) in enumerate(data_loader):
         start_time = time.time()
+        print('#### %s ####' % i)
 
         video = video.to(device)
         output, xent_loss, kldv_loss, diagnostics = model(video, orig=orig, visualize=True)
         loss = (xent_loss.mean() + kldv_loss.mean())
 
+        print('#### %s #### Done' % i)
         input()
         
         # if vis is not None and np.random.random() < 0.01:
@@ -412,7 +414,7 @@ def parse_args():
     args = parser.parse_args()
 
     if args.fast_test:
-        args.batch_size = 4
+        args.batch_size = 1
         args.workers = 0
         args.data_parallel = False
 

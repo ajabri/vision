@@ -359,6 +359,7 @@ import torchvision
 import transforms as T
 import skimage
 
+import utils
 
 def pca_feats(ff, solver='auto', img_normalize=True):
     ## expect ff to be   N x C x H x W
@@ -413,43 +414,105 @@ import cv2
 class PatchGraph(object):
     
     color = cm.get_cmap('jet')
-    pad = 2
+    pad = 0
     
     def blend(self, i):
-        img = (0.5 * self.maps[i] + 0.5 * self.grid[...,:-self.pad, :-self.pad]).copy() * 255
+
         y, x = i // self.W, i % self.W
         cx, cy = [int((self.w + self.pad) * (x  + 0.5)), int((self.h + self.pad) * (y  + 0.5))]
 
-        img[:, cy-5:cy+5, cx-5:cx+5] = 255
+        # if self.orig is None:
+        img1 = self.grid[...,:-self.pad, :-self.pad] if self.pad > 0 else self.grid
+        # else:
+        img2 = self.orig
+
+        img1 = (0.5 * self.maps[i] + 0.5 * img1).copy() * 255
+        img2 = (0.5 * self.maps[i] + 0.5 * img2).copy() * 255
+
+        img1[:, cy-5:cy+5, cx-5:cx+5] = 255
+        img2[:, cy-5:cy+5, cx-5:cx+5] = 255
         # img = cv2.circle(img.transpose(1,2,0), ctr, 10, (255, 255, 255), -1).get().transpose(2, 0, 1)
 
-        return img
-        
-    def __init__(self, viz, I, A, win='patchgraph'):
-        self._win = win
+        return img1, img2
 
+    def update(self):
+        self.viz.image(self.curr[0], win=self.win_id, env=self.viz.env+'_pg')
+        self.viz.image(self.curr[1], win=self.win_id2, env=self.viz.env+'_pg')
+
+    def __init__(self, viz, I, A, win='patchgraph', orig=None):
+        self._win = win
+        self.viz = viz
         self._birth = time.time()
-        N, C, h, w = I.shape
+
+        _, C, h, w = I.shape
+        N = A.shape[-1]
         H = W = int(N ** 0.5)
         self.N, self.H, self.W, self.h, self.w = N, H, W, h, w
 
-        A = A.view(H * W, H, W).transpose(-1, -2)
+        I = I.cpu()
+        A = A.view(H * W, H, W).cpu() #.transpose(-1, -2)
 
-        self.grid = torchvision.utils.make_grid(I, nrow=H, padding=self.pad, pad_value=0).cpu().numpy()
+        # psize = min(2000 // H, I.shape[-1])
+        # if psize < I.shape[-1]:
+        #     I = [cv2.resize(ii, (psize, psize)) for ii in I]
+
+        ####################################################################
+        # Construct image data
+        if N == 1:
+            self.grid = cv2.resize(orig[0].numpy().transpose(1,2,0), (800, 800), interpolation=cv2.INTER_LINEAR).transpose(2, 0, 1)
+        else:
+            self.grid = torchvision.utils.make_grid(I, nrow=H, padding=self.pad, pad_value=0).cpu().numpy()
+
         self.grid -= self.grid.min()
         self.grid /= self.grid.max()
+        
+        if orig is not None:
+            self.orig = cv2.resize(orig[0].numpy().transpose(1,2,0), self.grid.shape[-2:], interpolation=cv2.INTER_LINEAR).transpose(2, 0, 1)
+            self.orig -= self.orig.min()
+            self.orig /= self.orig.max()
+        else:
+            self.orig = None
+        # import pdb; pdb.set_trace()
 
-        big_A = [cv2.resize(aa, (H*(h+self.pad), W*(w+self.pad)), interpolation=cv2.INTER_NEAREST) for aa in A[:, :, :, None].cpu().detach().numpy()]
-        maps = [self.color(_a)[...,:3] for _a in big_A]
-        self.maps = torch.from_numpy(np.array(maps)).transpose(1, -1).numpy()
+        ####################################################################
+        # Construct map data
+
+        # pstride = utils.get_stride(orig.shape[-1], h, H)   # stride length used to gen patches, h is patch size, H is n patch per side
+        # map_sz_ratio = (pstride * H ) / orig.shape[-1]     # compute percentage of image spanned by affinity map overlay
+        # map_sz = int(map_sz_ratio * self.orig.shape[-1])
+        # lpad = int(((h-pstride)//2 / orig.shape[-1]) * self.orig.shape[-1])
+        # rpad = self.orig.shape[-1] - map_sz - lpad
+
+        map_sz = self.orig.shape[-1]
+        lpad, rpad = 0, 0
+
+        zeros = np.zeros(self.orig.shape).transpose(1,2,0)
+        maps = []
+        for a in A[:, :, :, None].cpu().detach().numpy():
+            _a = cv2.resize(a, (map_sz, map_sz), interpolation=cv2.INTER_NEAREST)
+            _a = self.color(_a)[...,:3]
+            a = zeros.copy()
+            if lpad > 0 and rpad > 0:
+                a[lpad:-rpad, lpad:-rpad, :] = _a
+            else:
+                a = _a
+            maps.append(a)
+
+        self.maps = np.array(maps).transpose(0, -1, 1, 2)
+
+        ####################################################################
+        # Set first image
 
         self.curr_id = N//2
         self.curr = self.blend(self.curr_id)
-
         # viz.text('', opts=dict(width=10000, height=2), env=viz.env+'_pg')
-        self.win_id = win_id = viz.image(self.curr, win=self._win, env=viz.env+'_pg')
-        # self.win_id_text = win_id_text = viz.text('', env=viz.env+'_pg')
         
+        self.win_id = self._win 
+        self.win_id2 = self._win+'2'
+
+        self.update()
+        ####################################################################
+
         def str2inttuple(s):
             try:
                 ss = s.split(',')
@@ -459,7 +522,7 @@ class PatchGraph(object):
                 return False
 
         def callback(event):
-            nonlocal win_id #, win_id_text
+            # nonlocal win_id #, win_id_text
             # print(event['event_type'])
 
             #TODO make the enter key recompute the A under a
@@ -471,7 +534,7 @@ class PatchGraph(object):
                     # print('hello!!', self.curr_id)
                     self.curr_id = min(max(self.curr_id, 0), N)
                     self.curr = self.blend(self.curr_id)
-                    viz.image(self.curr, win=self.win_id, env=viz.env+'_pg')
+                    self.update()
 
                 # curr_txt = event['pane_data']['content']
 
@@ -552,6 +615,9 @@ class Visualize(object):
         nn_patches(self.vis, P, A_k, prefix, N, K)
 
 
+def get_stride(im_sz, p_sz, res):
+    stride = (im_sz - p_sz)//(res-1)
+    return stride
 
 def nn_patches(vis, P, A_k, prefix='', N=10, K=20):
     # produces nearest neighbor visualization of N patches given an affinity matrix with K channels
@@ -719,16 +785,19 @@ def get_frame_transform(args):
     frame_transform_train = T.PerTimestepTransform(
             torchvision.transforms.Compose(tt)
         )
-
-    plain = torchvision.transforms.Compose([
-        torchvision.transforms.ToPILImage(),
+    plain1 = torchvision.transforms.Compose([
         norm_size, 
         transforms.ToTensor(),
         transforms.Normalize((0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010)),
     ])
+    plain = torchvision.transforms.Compose([
+        torchvision.transforms.ToPILImage(),
+        plain1
+    ])
 
     def with_orig(x):
-        return frame_transform_train(x), plain(x[0])
+        # import pdb; pdb.set_trace()
+        return frame_transform_train(x) if not args.visualize else T.PerTimestepTransform(plain1)(x), plain(x[0].permute(2, 0, 1))
 
     return with_orig
 
