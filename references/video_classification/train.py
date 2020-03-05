@@ -27,14 +27,17 @@ except ImportError:
 def visualize(model, data_loader, device, vis=None):
 
     header = 'Visualizing'
-    for video, orig in metric_logger.log_every(data_loader, print_freq, header):
+    i=0
+    for video, orig in data_loader:
+        i+=1
         start_time = time.time()
+        print('#### %s ####' % i)
 
         video = video.to(device)
         output, xent_loss, kldv_loss, diagnostics = model(video, orig=orig, visualize=True)
         loss = (xent_loss.mean() + kldv_loss.mean())
 
-        input()
+        input('#### %s Done ####' % i)
         
         # if vis is not None and np.random.random() < 0.01:
         #     vis.log('xent_loss', xent_loss.mean().item())
@@ -418,8 +421,8 @@ def parse_args():
 
     if args.output_dir == 'auto':
         args.dataset = 'kinetics' if 'kinetics' in args.data_path else 'pennaction'
-        keys = ['dataset', 'dropout', 'clip_len', 'frame_transforms', 'frame_aug', 'zero_diagonal', 'npatch', 'nrel', 'pstride', 'edgefunc', 'optim', 'temp', 'featdrop']
-        name = '_'.join(["%s%s" % (k, getattr(args, k)) for k in keys])
+        keys = ['dataset', 'dropout', 'clip_len', 'frame_transforms', 'frame_aug', 'zero_diagonal', 'npatch', 'nrel', 'pstride', 'edgefunc', 'optim', 'temp', 'featdrop', 'lr']
+        name = '_'.join(["%s%s" % (k, getattr(args, k) if not isinstance(getattr(args, k), list) else '-'.join([str(s) for s in getattr(args, k)])) for k in keys])
         args.output_dir = "checkpoints/%s_%s/" % (args.name, name)
 
         import datetime
