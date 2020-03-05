@@ -913,11 +913,13 @@ class From3D(nn.Module):
 def make_encoder(model_type='scratch'):
     import resnet3d
     import resnet2d
-
+    import antialiased as aa
+    import antialiased.resnet as aa_resnet
     if model_type == 'scratch':
         import torchvision.models.video.resnet as _resnet3d
         # resnet = resnet3d.r2d_10(pretrained=False)
-        resnet = resnet2d.resnet18(pretrained=False,)
+        # resnet = resnet2d.resnet18(pretrained=False,)
+        resnet = aa_resnet.resnet18(pretrained=False)
         #     norm_layer=lambda x: nn.GroupNorm(1, x))
         # resnet = resnet2d.resnet34(pretrained=False,)        
 
