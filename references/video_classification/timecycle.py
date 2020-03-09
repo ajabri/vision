@@ -46,7 +46,38 @@ class FoldTime(nn.Module):
     def forward(self, x):
         return x.view(x.shape[0] * x.shape[1], *x.shape[2:])
 
+class RestrictAttention(nn.Module):
+    def __init__(self, radius, flat=True):
+        super(RestrictAttention, self).__init__()
+        self.radius = radius
+        self.flat = flat
+        self.masks = {}
+        self.masks['10-10'] = self.make(10, 10)
 
+    def make(self, H, W):
+        if self.flat:
+            H = int(H**0.5)
+            W = int(W**0.5)
+        
+        gx, gy = torch.meshgrid(torch.arange(0, H), torch.arange(0, W))
+        D = ( (gx[None, None, :, :] - gx[:, :, None, None])**2 + (gy[None, None, :, :] - gy[:, :, None, None])**2 ).float() ** 0.5
+        D = (D < self.radius)[None].float()
+
+        if self.flat:
+            D = torch.flatten(torch.flatten(D, 1, 2), -2, -1)
+
+        return D
+
+    def forward(self, x):
+        H, W = x.shape[-2:]
+        sid = '%s-%s' % (H,W)
+        if sid not in self.masks:
+            self.masks[sid] = self.make(H, W).to(x.device)
+        mask = self.masks[sid]
+
+        return x * mask[0]
+        # import pdb; pdb.set_trace()
+        # x 
 
 class TimeCycle(nn.Module):
     def __init__(self, args=None, vis=None):
@@ -98,7 +129,8 @@ class TimeCycle(nn.Module):
         self._xent_targets = {}
         self._kldv_targets = {}
         
-            
+        self.restrict = RestrictAttention(8)
+
         self.dropout = torch.nn.Dropout(p=self.dropout_rate, inplace=False)
         self.featdrop = torch.nn.Dropout(p=self.featdrop_rate, inplace=False)
 
@@ -153,8 +185,15 @@ class TimeCycle(nn.Module):
     def compute_affinity(self, x1, x2, do_dropout=True, zero_diagonal=None):
         B, C, N = x1.shape
         # assert x1.shape == x2.shape
-        A = torch.einsum('bcn,bcm->bnm', self.featdrop(x1), self.featdrop(x2))
+
+        if do_dropout:
+            x1, x2 = self.featdrop(x1), self.featdrop(x2)
+
+        A = torch.einsum('bcn,bcm->bnm', x1, x2)
         # A = torch.div(A, 1/C**0.5)
+
+        if self.restrict is not None: #: and do_dropout:
+            A = self.restrict(A)
 
         if (zero_diagonal is not False) and self.zero_diagonal:
             A = self.zeroout_diag(A)
@@ -264,14 +303,14 @@ class TimeCycle(nn.Module):
             mm = mm.view(-1, *mm.shape[3:])[..., None, None]
             N = mm.shape[0] // B
             H, W = 1, 1
-        
+
         # import pdb; pdb.set_trace()
 
         # produce node vector representations by spatially pooling feature maps
         ff = mm.sum(-1).sum(-1) / (H*W)
         # ff = torch.einsum('ijklm->ijk', ff) / ff.shape[-1]*ff.shape[-2] 
 
-        ff = self.selfsim_fc(ff.transpose(-1, -2)).transpose(-1,-2)
+        # ff = self.selfsim_fc(ff.transpose(-1, -2)).transpose(-1,-2)
         ff = F.normalize(ff, p=2, dim=1)
     
         # reshape to add back batch and num node dimensions
@@ -329,8 +368,20 @@ class TimeCycle(nn.Module):
             return 0
 
     def forward(self, x, orig=None, just_feats=False, visualize=False):
-        xents = torch.tensor([0.]).cuda()
-        kldvs = torch.tensor([0.]).cuda()
+        
+        # x = x.cpu() * 0 + torch.randn(x.shape)
+        # x = x.cuda()
+
+        # orig = orig.cpu() * 0 + torch.randn(orig.shape)
+        # orig = orig.cuda()
+        
+        # import pdb; pdb.set_trace()
+
+        # xents = torch.tensor([0.]).cuda()
+        # kldvs = torch.tensor([0.]).cuda()
+        xents = [torch.tensor([0.]).cuda()]
+        kldvs = [torch.tensor([0.]).cuda()]
+
         diags = dict(skip_accur=torch.tensor([0.]).cuda())
 
         # Assume input is B x T x N*C x H x W        
@@ -384,7 +435,7 @@ class TimeCycle(nn.Module):
                     if not self.viz.win_exists(pg_win, env=self.viz.env+'_pg') or visualize:
                         tviz = 0
                         self.viz.clear_event_handlers(pg_win)
-                        A, AA, log_AA, A12, A21 = self.compute_affinity(ff[i:i+1, :, tviz], ff[i:i+1, :, tviz])
+                        A, AA, log_AA, A12, A21 = self.compute_affinity(ff[i:i+1, :, tviz], ff[i:i+1, :, tviz], do_dropout=False)
                         pg = utils.PatchGraph(self.viz, x[i, :, :, tviz], A[0], win=pg_win, orig=orig)
                         # import pdb; pdb.set_trace()
 
@@ -399,9 +450,12 @@ class TimeCycle(nn.Module):
                 xent_loss, acc = self.compute_xent_loss(A, log_AA)
                 kldv_loss = self.compute_kldv_loss(A, log_AA)
 
-                xents += xent_loss
-                kldvs += kldv_loss
-                diags['skip_accur'] += acc/L
+                # xents += xent_loss
+                # kldvs += kldv_loss
+                xents.append(xent_loss)
+                kldvs.append(kldv_loss)
+                diags['skip_accur'] += acc
+                
 
                 if (t2 - t1) == 1:
                     A12s.append(A12)
@@ -424,12 +478,19 @@ class TimeCycle(nn.Module):
                 xent_loss, acc = self.compute_xent_loss(aa, log_aa)
                 kldv_loss = self.compute_kldv_loss(aa, log_aa)
 
-                xents += xent_loss
-                kldvs += kldv_loss
+                # xents += xent_loss
+                # kldvs += kldv_loss
+
+                xents.append(xent_loss)
+                kldvs.append(kldv_loss)
+                
+
                 diags['acc cyc %s' % str(i)] = acc
                 diags['xent cyc %s' % str(i)] = xent_loss.mean().detach()
 
 
+            # for i in range()
+            
         if _N > 1 and (np.random.random() < 0.01 or visualize):
             # all patches
             all_x = x.permute(0, 3, 1, 2, 4, 5)
@@ -440,6 +501,8 @@ class TimeCycle(nn.Module):
 
             utils.nn_patches(self.viz, all_x, all_A[None])
 
-        return ff, self.xent_coef * (xents.unsqueeze(0)/L), self.kldv_coef * (kldvs.unsqueeze(0)/L), diags
+        # import pdb; pdb.set_trace()
+
+        return ff, self.xent_coef * sum(xents)/(len(xents)-1), self.kldv_coef * sum(kldvs)/(len(kldvs)-1), diags
 
 

@@ -267,6 +267,10 @@ def main(args):
         model = torch.nn.parallel.DataParallel(model)
         model_without_ddp = model.module
     
+    if args.reload:
+        checkpoint = torch.load(args.reload, map_location='cpu')
+        model_without_ddp.load_state_dict(checkpoint['model'])
+
     if args.resume:
         checkpoint = torch.load(args.resume, map_location='cpu')
         model_without_ddp.load_state_dict(checkpoint['model'])
@@ -344,6 +348,7 @@ def parse_args():
     parser.add_argument('--print-freq', default=10, type=int, help='print frequency')
     parser.add_argument('--output-dir', default='auto', help='path where to save')
     parser.add_argument('--resume', default='', help='resume from checkpoint')
+    parser.add_argument('--reload', default='', help='resume from checkpoint')
     parser.add_argument('--start-epoch', default=0, type=int, metavar='N',
                         help='start epoch')
     

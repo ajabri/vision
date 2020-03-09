@@ -437,7 +437,7 @@ class PatchGraph(object):
 
     def update(self):
         self.viz.image(self.curr[0], win=self.win_id, env=self.viz.env+'_pg')
-        self.viz.image(self.curr[1], win=self.win_id2, env=self.viz.env+'_pg')
+        # self.viz.image(self.curr[1], win=self.win_id2, env=self.viz.env+'_pg')
 
     def __init__(self, viz, I, A, win='patchgraph', orig=None):
         self._win = win
@@ -450,6 +450,7 @@ class PatchGraph(object):
         self.N, self.H, self.W, self.h, self.w = N, H, W, h, w
 
         I = I.cpu()
+        orig = orig.cpu()
         A = A.view(H * W, H, W).cpu() #.transpose(-1, -2)
 
         # psize = min(2000 // H, I.shape[-1])
@@ -908,8 +909,6 @@ class From3D(nn.Module):
 
         return mm.view(N, T, *mm.shape[-3:]).permute(0, 2, 1, 3, 4)
 
-
-
 def make_encoder(model_type='scratch'):
     import resnet3d
     import resnet2d
@@ -918,11 +917,15 @@ def make_encoder(model_type='scratch'):
     if model_type == 'scratch':
         import torchvision.models.video.resnet as _resnet3d
         # resnet = resnet3d.r2d_10(pretrained=False)
-        # resnet = resnet2d.resnet18(pretrained=False,)
-        resnet = aa_resnet.resnet18(pretrained=False)
-        #     norm_layer=lambda x: nn.GroupNorm(1, x))
+        resnet = resnet2d.resnet18(pretrained=False,)
+        # resnet = aa_resnet.resnet18(pretrained=False)
+        # norm_layer=lambda x: nn.GroupNorm(1, x))
         # resnet = resnet2d.resnet34(pretrained=False,)        
 
+    elif model_type == 'bagnet':
+        import bagnet
+        resnet = bagnet.bagnet17(pretrained=True)
+        
     elif model_type == 'imagenet':
         resnet2d._REFLECT_PAD = False
         resnet = resnet2d.resnet18(pretrained=True)
@@ -933,7 +936,9 @@ def make_encoder(model_type='scratch'):
         # self.resnet = _resnet3d.r3d_18(pretrained=True)
         # self.resnet = resnet3d.r2d_18(pretrained=True)
 
-    resnet.fc, resnet.avgpool, resnet.layer4 = None, None, None
+
+    resnet.fc, resnet.avgpool, = None, None
+    resnet.layer4 = None
 
     if 'Conv2d' in str(resnet):
         resnet = From3D(resnet)
