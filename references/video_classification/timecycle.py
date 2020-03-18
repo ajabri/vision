@@ -79,7 +79,12 @@ class RestrictAttention(nn.Module):
         # import pdb; pdb.set_trace()
         # x 
 
+
+
 class TimeCycle(nn.Module):
+    def garg(self, k, d):
+        return getattr(self.args, k) if hasattr(self.args, k) else d
+        
     def __init__(self, args=None, vis=None):
         super(TimeCycle, self).__init__()
         
@@ -101,22 +106,28 @@ class TimeCycle(nn.Module):
             self.featdrop_rate = 0
             self.model_type = 'scratch'
             self.temperature = 1
-
         
         self.encoder = utils.make_encoder(self.model_type)
 
         self.infer_dims()
 
-        self.selfsim_fc = torch.nn.Linear(self.enc_hid_dim, 128)
-        
-        self.selfsim_head = self.make_head([self.enc_hid_dim, 2*self.enc_hid_dim, self.enc_hid_dim])
-        self.context_head = self.make_head([self.enc_hid_dim, 2*self.enc_hid_dim, self.enc_hid_dim])
+        self.selfsim_fc = self.make_head(depth=self.garg('head_depth', 0))
+        self.selfsim_head = self.make_conv3d_head(depth=1)
+        self.context_head = self.make_conv3d_head(depth=1)
 
-        # assuming no fc pre-training
-        for m in self.modules():
-            if isinstance(m, nn.Linear):
-                m.weight.data.normal_(0, 0.01)
-                m.bias.data.zero_()
+        # self.selfsim_head = self.make_head([self.enc_hid_dim, 2*self.enc_hid_dim, self.enc_hid_dim])
+        # self.context_head = self.make_head([self.enc_hid_dim, 2*self.enc_hid_dim, self.enc_hid_dim])
+
+        import resnet3d, resnet2d
+        if self.garg('cal_coef', 0) > 0:
+            self.stack_encoder = utils.make_stack_encoder(self.enc_hid_dim)
+            # self.aff_encoder = resnet2d.Bottleneck(1, 128,)
+
+        # # assuming no fc pre-training
+        # for m in self.modules():
+        #     if isinstance(m, nn.Linear):
+        #         m.weight.data.normal_(0, 0.01)
+        #         m.bias.data.zero_()
 
         self.edge = getattr(args, 'edgefunc', 'softmax')
 
@@ -129,7 +140,10 @@ class TimeCycle(nn.Module):
         self._xent_targets = {}
         self._kldv_targets = {}
         
-        self.restrict = RestrictAttention(8)
+        if self.garg('restrict', 0) > 0:
+            self.restrict = RestrictAttention(int(args.restrict))
+        else:
+            self.restrict =  None 
 
         self.dropout = torch.nn.Dropout(p=self.dropout_rate, inplace=False)
         self.featdrop = torch.nn.Dropout(p=self.featdrop_rate, inplace=False)
@@ -151,16 +165,41 @@ class TimeCycle(nn.Module):
 
         # import pdb; pdb.set_trace()
 
-    def make_head(self, dims):
+    def make_head(self, depth=1):
         head = []
+
+        if depth == 0:
+            return nn.Linear(self.enc_hid_dim, 128)
+            
+        dims = [self.enc_hid_dim] + [self.enc_hid_dim] * depth + [128]
+
+        for d1, d2 in zip(dims, dims[1:]):
+            # h = nn.Conv3d(d1, d2, kernel_size=1, bias=True)
+            # nn.init.kaiming_normal_(h.weight, mode='fan_out', nonlinearity='relu')
+            h = nn.Linear(d1, d2)
+            head += [h, nn.ReLU()]
+
+        head = head[:-1]
+        head = nn.Sequential(*head)
+        return head
+
+        # return 
+
+    def make_conv3d_head(self, depth=1):
+        head = []
+
+        dims = [self.enc_hid_dim] + [2*self.enc_hid_dim] * depth + [256]
 
         for d1, d2 in zip(dims, dims[1:]):
             h = nn.Conv3d(d1, d2, kernel_size=1, bias=True)
             nn.init.kaiming_normal_(h.weight, mode='fan_out', nonlinearity='relu')
             head += [h, nn.ReLU()]
 
+        head = head[:-1]
         head = nn.Sequential(*head)
         return head
+
+        # return 
 
     def make_smooth_target_2d(self, H, W):
         import time
@@ -190,7 +229,6 @@ class TimeCycle(nn.Module):
             x1, x2 = self.featdrop(x1), self.featdrop(x2)
 
         A = torch.einsum('bcn,bcm->bnm', x1, x2)
-        # A = torch.div(A, 1/C**0.5)
 
         if self.restrict is not None: #: and do_dropout:
             A = self.restrict(A)
@@ -220,6 +258,278 @@ class TimeCycle(nn.Module):
 
         return A, AA, log_AA, A1, A2
     
+
+    def pixels_to_nodes(self, x):
+        # Encode into B x C x T x N
+        B, N, C, T, h, w = x.shape
+        x = x.reshape(B*N, C, T, h, w) 
+
+        mm = self.encoder(x)
+
+        # HACK: Attempted spatial dropout when trying to hack dense feature setting
+        # _mm = torch.flatten(mm.transpose(1,2), start_dim=0, end_dim=1)
+        # mm = nn.functional.dropout2d(_mm, p=self.featdrop_rate).view(B, T, *_mm.shape[1:]).transpose(1, 2)
+
+        H, W = mm.shape[-2:]
+
+        if N == 1:  # encode 1 image into feature map, use those vecs as nodes
+            mm = mm.permute(0, -2, -1, 1, 2).contiguous()
+            mm = mm.view(-1, *mm.shape[3:])[..., None, None]
+            N = mm.shape[0] // B
+            H, W = 1, 1
+
+        # import pdb; pdb.set_trace()
+
+        # produce node vector representations by spatially pooling feature maps
+        ff = mm.sum(-1).sum(-1) / (H*W)
+        # ff = torch.einsum('ijklm->ijk', ff) / ff.shape[-1]*ff.shape[-2] 
+
+        # import pdb; pdb.set_trace()
+
+        ff = self.selfsim_fc(ff.transpose(-1, -2)).transpose(-1,-2)
+        ff = F.normalize(ff, p=2, dim=1)
+    
+        # reshape to add back batch and num node dimensions
+        ff = ff.view(B, N, ff.shape[1], T).permute(0, 2, 3, 1)
+        mm = mm.view(B, N, *mm.shape[1:])
+
+        # import pdb; pdb.set_trace()
+
+        return ff, mm
+
+
+    def forward(self, x, orig=None, just_feats=False, visualize=False):
+        # x = x.cpu() * 0 + torch.randn(x.shape)
+        # x = x.cuda()
+
+        # orig = orig.cpu() * 0 + torch.randn(orig.shape)
+        # orig = orig.cuda()
+        
+        xents = [torch.tensor([0.]).cuda()]
+        kldvs = [torch.tensor([0.]).cuda()]
+        diags = dict(skip_accur=torch.tensor([0.]).cuda())
+
+        # Assume input is B x T x N*C x H x W        
+        B, T, C, H, W = x.shape
+        _N, C = C//3, 3
+
+        if _N == 1 and visualize:
+            # patchify with unfold
+            _sz, res = 80, 10
+            stride = utils.get_stride(H, _sz, res)
+            B, C, H, W = orig.shape
+
+            unfold = torch.nn.Unfold((_sz,_sz), dilation=1, padding=0, stride=(stride, stride))
+            x = unfold(orig.view(B, C, H, W))
+            x = x.view(B, 1, C, _sz, _sz, x.shape[-1]).permute(0, -1, 2, 1, 3, 4)
+            # x = x.cuda()
+
+            ff, mm = [], []
+            _bsz = 100
+            for i in range(0, x.shape[1], _bsz):
+                fff, mmm = self.pixels_to_nodes(x[:, i:i+_bsz].cuda())
+                ff.append(fff)
+                mm.append(mmm)
+
+            ff = torch.cat(ff, dim=-1)
+            mm = torch.cat(mm, dim=1)
+
+            # import pdb; pdb.set_trace()
+        else:
+            x = x.transpose(1,2).view(B, _N, C, T, H, W)
+            ff, mm = self.pixels_to_nodes(x)
+        
+        # import pdb; pdb.set_trace()
+        if just_feats:
+            return ff, mm
+        B, C, T, N = ff.shape
+
+        A12s = []
+        A21s = []
+        AAs  = []
+        As = []
+
+        # produce A between all pairs of frames, store A for adjacent frames
+        t_pairs = list(itertools.combinations(range(T), 2))
+        L = len(t_pairs)
+
+        if np.random.random() < 0.1 or visualize:
+            if ff.device.index == 0:
+                for i in range(B):
+                    pg_win = 'patchgraph_%s'%i
+                    # print('exists', self.viz.win_exists(pg_win, env=self.viz.env+'_pg'))
+                    if not self.viz.win_exists(pg_win, env=self.viz.env+'_pg') or visualize:
+                        tviz = 0
+                        self.viz.clear_event_handlers(pg_win)
+                        A, AA, log_AA, A12, A21 = self.compute_affinity(ff[i:i+1, :, tviz], ff[i:i+1, :, tviz], do_dropout=False)
+                        pg = utils.PatchGraph(self.viz, x[i, :, :, tviz], A[0], win=pg_win, orig=orig)
+                        # import pdb; pdb.set_trace()
+
+        if len(t_pairs) > 0:
+
+            for (t1, t2) in t_pairs:
+                f1, f2 = ff[:, :, t1], ff[:, :, t2]
+
+                A, AA, log_AA, A12, A21 = self.compute_affinity(f1, f2)
+                log_AA = log_AA.view(-1, log_AA.shape[-1])
+
+                if self.garg('skip_coef', 0) > 0:
+                    xent_loss, acc = self.compute_xent_loss(A, log_AA)
+                    kldv_loss = self.compute_kldv_loss(A, log_AA)
+
+                    # xents += xent_loss
+                    # kldvs += kldv_loss
+                    xents.append(xent_loss)
+                    kldvs.append(kldv_loss)
+                    diags['skip_accur'] += acc
+                
+                As.append(A12)
+                if (t2 - t1) == 1:
+                    A12s.append(A12)
+                    A21s.append(A21)
+                    AAs.append(AA)
+
+                # _AA = AA.view(-1, H * W, H, W)
+                if np.random.random() < 0.001 or visualize:
+                    self.viz.text('%s %s' % (t1, t2), opts=dict(height=1, width=10000), win='div')
+                    self.visualize_frame_pair(x, ff, mm, t1, t2)
+
+            #########################################################
+            # Affinity contrastive
+            #########################################################
+
+            if self.garg('cal_coef', 0) > 0:
+                if not hasattr(self, 'aff_encoder'):
+                    # downsample = nn.Conv3d(N, N//2,
+                    #         kernel_size=1, stride=2, bias=False),
+                    #     nn.BatchNorm2d(N//2)
+                    # )
+                    # self.aff_encoder = resnet2d.Bottleneck(A.shape[-1], 128, downsample=downsample)
+                    aff_C = A.shape[-1]
+                    self.aff_encoder = utils.make_aff_encoder(aff_C, self.enc_hid_dim).to(x.device)
+
+                _As = torch.cat(As, dim=0)
+                _As = _As.view(*_As.shape[:-1], int(N**0.5), int(N**0.5))
+                a_con = self.aff_encoder(_As)
+                a_con = a_con.sum(-1).sum(-1) / (a_con.shape[-1]*a_con.shape[-2])
+
+                # _mm = mm.squeeze(-1).squeeze(-1).permute(0, 2, 3, 1)
+                # _mm = mm.squeeze(-1).squeeze(-1).permute(0, 2, 3, 1) 
+                # _mm = _mm.view(*_mm.shape[:-1], int(N**0.5), int(N**0.5))
+
+                _ff = ff.view(*ff.shape[:-1], int(N**0.5), int(N**0.5))
+                idxs = torch.Tensor(t_pairs).long()
+                _ff = _ff[:, :, idxs].transpose(1, 2).flatten(0,1)
+
+                a_hat = self.stack_encoder(_ff).squeeze(-3)
+                a_hat = a_hat.sum(-1).sum(-1) / (a_hat.shape[-1]*a_hat.shape[-2])
+
+                a_hat, a_con = F.normalize(a_hat, dim=-1), F.normalize(a_con, dim=-1)
+
+                a_pred = torch.einsum('jk,lk->jl', a_hat, a_con) / self.temperature
+                a_targ = torch.arange(0, a_pred.shape[-1]).to(a_pred.device)
+                a_loss = self.xent(a_pred, a_targ).mean()
+                xents.append(a_loss)
+                diags['xent cont aff'] = a_loss.detach()
+
+
+                # a_hat = a_hat.view(B, -1, *a_hat.shape[1:])
+                # a_con = a_con.view(B, -1, *a_con.shape[1:])
+
+                # for i, (t1, t2) in enumerate(t_pairs):
+                #     _mm = mm.squeeze(-1).squeeze(-1).permute(0, 2, 3, 1)
+                #     _mm = _mm.view(*_mm.shape[:-1], int(N**0.5), int(N**0.5))
+
+                #     m1, m2 = _mm[:, :, t1], _mm[:, :, t2]
+                #     ms = torch.stack([m1,m2], dim=2)
+
+                    # a_hat = self.stack_encoder(ms)[..., 0, :, :]
+                    # a_hat = a_hat.sum(-1).sum(-1) / (a_hat.shape[-1]*a_hat.shape[-2])
+
+                # import pdb; pdb.set_trace()
+
+            #########################################################
+
+
+            # longer cycle:
+            if self.garg('long_coef', 0) > 0:
+                a12, a21 = A12s[0], A21s[0]
+                for i in range(1, len(A12s)):
+                    a12, a21 = torch.matmul(A12s[i], a12), torch.matmul(a21, A21s[i])
+                    aa = torch.matmul(a21, a12)
+                    log_aa = torch.log(aa + 1e-20).view(-1, aa.shape[-1])
+
+                    xent_loss, acc = self.compute_xent_loss(aa, log_aa)
+                    kldv_loss = self.compute_kldv_loss(aa, log_aa)
+
+                    # xents += xent_loss
+                    # kldvs += kldv_loss
+
+                    xents.append(xent_loss)
+                    kldvs.append(kldv_loss)
+                    
+                    diags['acc cyc %s' % str(i)] = acc
+                    diags['xent cyc %s' % str(i)] = xent_loss.mean().detach()
+
+            
+        if _N > 1 and (np.random.random() < 0.001 or visualize):
+            # all patches
+            all_x = x.permute(0, 3, 1, 2, 4, 5)
+            all_x = all_x.reshape(-1, *all_x.shape[-3:])
+            all_f = ff.permute(0, 2, 3, 1).reshape(-1, ff.shape[1])
+            all_f = all_f.reshape(-1, *all_f.shape[-1:])
+            all_A = torch.einsum('ij,kj->ik', all_f, all_f)
+
+            utils.nn_patches(self.viz, all_x, all_A[None])
+
+        return ff, self.xent_coef * sum(xents)/max(1, len(xents)-1), self.kldv_coef * sum(kldvs)/max(1, len(kldvs)-1), diags
+
+    def kldv_targets(self, A):
+        '''
+            A: affinity matrix
+        '''
+        B, N = A.shape[:2]
+        key = '%s:%sx%s' % (str(A.device), B,N)
+
+        if key not in self._kldv_targets:
+            I = self.make_smooth_target_2d(int(N**0.5), int(N**0.5))
+            I = I[None].repeat(B, 1, 1).view(-1, A.shape[-1]).to(A.device)
+            self._kldv_targets[key] = I
+
+        return self._kldv_targets[key]
+
+    def xent_targets(self, A):
+        B, N = A.shape[:2]
+        key = '%s:%sx%s' % (str(A.device), B,N)
+
+        if key not in self._xent_targets:
+            I = torch.arange(A.shape[-1])[None].repeat(B, 1)
+            I = I.view(-1).to(A.device)
+            self._xent_targets[key] = I
+
+        return self._xent_targets[key]
+
+    def compute_xent_loss(self, A, log_AA):
+        # Cross Entropy
+        targets = self.xent_targets(A)
+        if self.xent_coef > 0:
+            _xent_loss = self.xent(log_AA, targets)
+
+            return _xent_loss.mean().unsqueeze(-1), \
+                (torch.argmax(log_AA, dim=-1) == targets).float().mean().unsqueeze(-1)
+        else:
+            return 0, 0
+
+    def compute_kldv_loss(self, A, log_AA):
+        # KL Div with Smoothed 2D Targets
+        targets = self.kldv_targets(A)
+        if self.kldv_coef > 0:
+            kldv_loss = self.kldv(log_AA, targets)
+            # print(kldv_loss, log_AA.min(), AA.min(), A.min())
+            return kldv_loss
+        else:
+            return 0
+
     def visualize_frame_pair(self, x, ff, mm, t1, t2):
         # B, C, T, N = ff.shape
         f1, f2 = ff[:, :, t1], ff[:, :, t2]
@@ -282,227 +592,3 @@ class TimeCycle(nn.Module):
         
         # img_grid = cv2.resize(img_grid.permute(1, 2, 0).cpu().detach().numpy(), (1000, 1000), interpolation=cv2.INTER_NEAREST).transpose(2, 0, 1)
         self.viz.images(img_grid, win='lossvis')
-
-
-    def pixels_to_nodes(self, x):
-        # Encode into B x C x T x N
-        B, N, C, T, h, w = x.shape
-        x = x.reshape(B*N, C, T, h, w) 
-
-        mm = self.encoder(x)
-
-        _mm = torch.flatten(mm.transpose(1,2), start_dim=0, end_dim=1)
-        mm = nn.functional.dropout2d(_mm, p=self.featdrop_rate).view(B, T, *_mm.shape[1:]).transpose(1, 2)
-
-        H, W = mm.shape[-2:]
-
-        # import pdb; pdb.set_trace()
-
-        if N == 1:  # encode 1 image into feature map, use those vecs as nodes
-            mm = mm.permute(0, -2, -1, 1, 2).contiguous()
-            mm = mm.view(-1, *mm.shape[3:])[..., None, None]
-            N = mm.shape[0] // B
-            H, W = 1, 1
-
-        # import pdb; pdb.set_trace()
-
-        # produce node vector representations by spatially pooling feature maps
-        ff = mm.sum(-1).sum(-1) / (H*W)
-        # ff = torch.einsum('ijklm->ijk', ff) / ff.shape[-1]*ff.shape[-2] 
-
-        # ff = self.selfsim_fc(ff.transpose(-1, -2)).transpose(-1,-2)
-        ff = F.normalize(ff, p=2, dim=1)
-    
-        # reshape to add back batch and num node dimensions
-        ff = ff.view(B, N, ff.shape[1], T).permute(0, 2, 3, 1)
-        mm = mm.view(B, N, *mm.shape[1:])
-
-        # import pdb; pdb.set_trace()
-
-        return ff, mm
-
-    def kldv_targets(self, A):
-        '''
-            A: affinity matrix
-        '''
-        B, N = A.shape[:2]
-        key = '%s:%sx%s' % (str(A.device), B,N)
-
-        if key not in self._kldv_targets:
-            I = self.make_smooth_target_2d(int(N**0.5), int(N**0.5))
-            I = I[None].repeat(B, 1, 1).view(-1, A.shape[-1]).to(A.device)
-            self._kldv_targets[key] = I
-
-        return self._kldv_targets[key]
-
-    def xent_targets(self, A):
-        B, N = A.shape[:2]
-        key = '%s:%sx%s' % (str(A.device), B,N)
-
-        if key not in self._xent_targets:
-            I = torch.arange(A.shape[-1])[None].repeat(B, 1)
-            I = I.view(-1).to(A.device)
-            self._xent_targets[key] = I
-
-        return self._xent_targets[key]
-
-    def compute_xent_loss(self, A, log_AA):
-        # Cross Entropy
-        targets = self.xent_targets(A)
-        if self.xent_coef > 0:
-            _xent_loss = self.xent(log_AA, targets)
-
-            return _xent_loss.mean().unsqueeze(-1), \
-                (torch.argmax(log_AA, dim=-1) == targets).float().mean().unsqueeze(-1)
-        else:
-            return 0, 0
-
-    def compute_kldv_loss(self, A, log_AA):
-        # KL Div with Smoothed 2D Targets
-        targets = self.kldv_targets(A)
-        if self.kldv_coef > 0:
-            kldv_loss = self.kldv(log_AA, targets)
-            # print(kldv_loss, log_AA.min(), AA.min(), A.min())
-            return kldv_loss
-        else:
-            return 0
-
-    def forward(self, x, orig=None, just_feats=False, visualize=False):
-        
-        # x = x.cpu() * 0 + torch.randn(x.shape)
-        # x = x.cuda()
-
-        # orig = orig.cpu() * 0 + torch.randn(orig.shape)
-        # orig = orig.cuda()
-        
-        # import pdb; pdb.set_trace()
-
-        # xents = torch.tensor([0.]).cuda()
-        # kldvs = torch.tensor([0.]).cuda()
-        xents = [torch.tensor([0.]).cuda()]
-        kldvs = [torch.tensor([0.]).cuda()]
-
-        diags = dict(skip_accur=torch.tensor([0.]).cuda())
-
-        # Assume input is B x T x N*C x H x W        
-        B, T, C, H, W = x.shape
-        _N, C = C//3, 3
-
-        if _N == 1 and visualize:
-            # patchify with unfold
-            _sz, res = 80, 10
-            stride = utils.get_stride(H, _sz, res)
-            B, C, H, W = orig.shape
-
-            unfold = torch.nn.Unfold((_sz,_sz), dilation=1, padding=0, stride=(stride, stride))
-            x = unfold(orig.view(B, C, H, W))
-            x = x.view(B, 1, C, _sz, _sz, x.shape[-1]).permute(0, -1, 2, 1, 3, 4)
-            # x = x.cuda()
-
-            ff, mm = [], []
-            _bsz = 100
-            for i in range(0, x.shape[1], _bsz):
-                fff, mmm = self.pixels_to_nodes(x[:, i:i+_bsz].cuda())
-                ff.append(fff)
-                mm.append(mmm)
-
-            ff = torch.cat(ff, dim=-1)
-            mm = torch.cat(mm, dim=1)
-
-            # import pdb; pdb.set_trace()
-        else:
-            x = x.transpose(1,2).view(B, _N, C, T, H, W)
-            ff, mm = self.pixels_to_nodes(x)
-        
-        # import pdb; pdb.set_trace()
-        if just_feats:
-            return ff, mm
-        B, C, T, N = ff.shape
-
-        A12s = []
-        A21s = []
-        AAs  = []
-
-        # produce A between all pairs of frames, store A for adjacent frames
-        t_pairs = list(itertools.combinations(range(T), 2))
-        L = len(t_pairs)
-
-        if np.random.random() < 0.1 or visualize:
-            if ff.device.index == 0:
-                for i in range(B):
-                    pg_win = 'patchgraph_%s'%i
-                    # print('exists', self.viz.win_exists(pg_win, env=self.viz.env+'_pg'))
-                    if not self.viz.win_exists(pg_win, env=self.viz.env+'_pg') or visualize:
-                        tviz = 0
-                        self.viz.clear_event_handlers(pg_win)
-                        A, AA, log_AA, A12, A21 = self.compute_affinity(ff[i:i+1, :, tviz], ff[i:i+1, :, tviz], do_dropout=False)
-                        pg = utils.PatchGraph(self.viz, x[i, :, :, tviz], A[0], win=pg_win, orig=orig)
-                        # import pdb; pdb.set_trace()
-
-        if len(t_pairs) > 0:
-
-            for (t1, t2) in t_pairs:
-                f1, f2 = ff[:, :, t1], ff[:, :, t2]
-
-                A, AA, log_AA, A12, A21 = self.compute_affinity(f1, f2)
-                log_AA = log_AA.view(-1, log_AA.shape[-1])
-
-                xent_loss, acc = self.compute_xent_loss(A, log_AA)
-                kldv_loss = self.compute_kldv_loss(A, log_AA)
-
-                # xents += xent_loss
-                # kldvs += kldv_loss
-                xents.append(xent_loss)
-                kldvs.append(kldv_loss)
-                diags['skip_accur'] += acc
-                
-
-                if (t2 - t1) == 1:
-                    A12s.append(A12)
-                    A21s.append(A21)
-                    AAs.append(AA)
-
-                # _AA = AA.view(-1, H * W, H, W)
-                if np.random.random() < 0.02 or visualize:
-                    self.viz.text('%s %s' % (t1, t2), opts=dict(height=1, width=10000), win='div')
-                    self.visualize_frame_pair(x, ff, mm, t1, t2)
-
-
-            # longer cycle:
-            a12, a21 = A12s[0], A21s[0]
-            for i in range(1, len(A12s)):
-                a12, a21 = torch.matmul(A12s[i], a12), torch.matmul(a21, A21s[i])
-                aa = torch.matmul(a21, a12)
-                log_aa = torch.log(aa + 1e-20).view(-1, aa.shape[-1])
-
-                xent_loss, acc = self.compute_xent_loss(aa, log_aa)
-                kldv_loss = self.compute_kldv_loss(aa, log_aa)
-
-                # xents += xent_loss
-                # kldvs += kldv_loss
-
-                xents.append(xent_loss)
-                kldvs.append(kldv_loss)
-                
-
-                diags['acc cyc %s' % str(i)] = acc
-                diags['xent cyc %s' % str(i)] = xent_loss.mean().detach()
-
-
-            # for i in range()
-            
-        if _N > 1 and (np.random.random() < 0.01 or visualize):
-            # all patches
-            all_x = x.permute(0, 3, 1, 2, 4, 5)
-            all_x = all_x.reshape(-1, *all_x.shape[-3:])
-            all_f = ff.permute(0, 2, 3, 1).reshape(-1, ff.shape[1])
-            all_f = all_f.reshape(-1, *all_f.shape[-1:])
-            all_A = torch.einsum('ij,kj->ik', all_f, all_f)
-
-            utils.nn_patches(self.viz, all_x, all_A[None])
-
-        # import pdb; pdb.set_trace()
-
-        return ff, self.xent_coef * sum(xents)/(len(xents)-1), self.kldv_coef * sum(kldvs)/(len(kldvs)-1), diags
-
-

@@ -798,7 +798,7 @@ def get_frame_transform(args):
 
     def with_orig(x):
         # import pdb; pdb.set_trace()
-        return frame_transform_train(x) if not args.visualize else T.PerTimestepTransform(plain1)(x), plain(x[0].permute(2, 0, 1))
+        return frame_transform_train(x) if not args.visualize else T.PerTimestepTransform(plain1)(x), plain(x[0].transpose(2, 0, 1))
 
     return with_orig
 
@@ -944,3 +944,57 @@ def make_encoder(model_type='scratch'):
         resnet = From3D(resnet)
 
     return resnet
+
+def make_stack_encoder(in_dim, out_dim=None):
+    import resnet3d
+    import torchvision.models.video.resnet as _resnet3d
+    
+    dim = in_dim
+    out_dim = out_dim if out_dim is not None else dim
+
+    return _initialize_weights(nn.Sequential(
+        resnet3d.Conv3DChooseTemporal(dim, dim, stride=2),
+        nn.BatchNorm3d(dim),
+        nn.ReLU(inplace=True),
+
+        nn.Conv3d(dim, dim, stride=(1, 2, 2), kernel_size=(1, 3, 3), padding=(0, 1, 1)),
+        nn.BatchNorm3d(dim),
+        nn.ReLU(inplace=True),
+
+        nn.Conv3d(dim, out_dim, stride=(1, 2, 2), kernel_size=(1, 3, 3), padding=(0, 1, 1)),
+        nn.BatchNorm3d(out_dim),
+        nn.ReLU(inplace=True),
+    ))
+
+def make_aff_encoder(in_dim, out_dim=None):
+    out_dim = out_dim if out_dim is not None else in_dim
+    
+    return _initialize_weights(nn.Sequential(*[
+        nn.Conv2d(in_dim, in_dim, kernel_size=3, stride=1),
+        nn.BatchNorm2d(in_dim),
+        nn.ReLU(inplace=True),
+
+        nn.Conv2d(in_dim, in_dim, kernel_size=3, stride=1),
+        nn.BatchNorm2d(in_dim),
+        nn.ReLU(inplace=True),
+        
+        nn.Conv2d(in_dim, out_dim, kernel_size=3, stride=1),
+        nn.BatchNorm2d(out_dim),
+        nn.ReLU(inplace=True),
+    ]))
+
+def _initialize_weights(model):
+    for m in model.modules():
+        if isinstance(m, nn.Conv3d):
+            nn.init.kaiming_normal_(m.weight, mode='fan_out',
+                                    nonlinearity='relu')
+            if m.bias is not None:
+                nn.init.constant_(m.bias, 0)
+        elif isinstance(m, nn.BatchNorm3d):
+            nn.init.constant_(m.weight, 1)
+            nn.init.constant_(m.bias, 0)
+        elif isinstance(m, nn.Linear):
+            nn.init.normal_(m.weight, 0, 0.01)
+            nn.init.constant_(m.bias, 0)
+
+    return model

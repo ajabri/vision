@@ -32,6 +32,10 @@ def visualize(model, data_loader, device, vis=None):
         print('#### %s ####' % i)
 
         video = video.to(device)
+        # video -= video.min(); video /= video.max()
+        # [vis.vis.images(v, env='viz_kinetics') for v in video]
+
+        # import pdb; pdb.set_trace()
         output, xent_loss, kldv_loss, diagnostics = model(video, orig=orig, visualize=True)
         loss = (xent_loss.mean() + kldv_loss.mean())
 
@@ -57,9 +61,9 @@ def train_one_epoch(model, criterion, optimizer, lr_scheduler, data_loader, devi
         start_time = time.time()
 
         video = video.to(device)
-        # import pdb; pdb.set_trace()
         output, xent_loss, kldv_loss, diagnostics = model(video, orig=orig)
         loss = (xent_loss.mean() + kldv_loss.mean())
+        # print(xent_loss, kldv_loss, loss)
 
         if vis is not None and np.random.random() < 0.01:
             vis.log('xent_loss', xent_loss.mean().item())
@@ -72,10 +76,7 @@ def train_one_epoch(model, criterion, optimizer, lr_scheduler, data_loader, devi
 
         # output, xent_loss, kldv_loss = model(video)
         # loss = (kldv_loss.mean() + xent_loss.mean()) #+ kldv_loss
-        # import pdb; pdb.set_trace()
-
         # print(loss)
-        # import pdb; pdb.set_trace()
         # loss = criterion(output, target)
 
         optimizer.zero_grad()
@@ -270,6 +271,10 @@ def main(args):
     if args.reload:
         checkpoint = torch.load(args.reload, map_location='cpu')
         model_without_ddp.load_state_dict(checkpoint['model'])
+        optimizer.load_state_dict(checkpoint['optimizer'])
+        # lr_scheduler.load_state_dict(checkpoint['lr_scheduler'])
+        optimizer.param_groups[0]["lr"] = args.lr
+        args.start_epoch = checkpoint['epoch'] + 1
 
     if args.resume:
         checkpoint = torch.load(args.resume, map_location='cpu')
@@ -412,8 +417,21 @@ def parse_args():
     parser.add_argument('--featdrop', default=0.0,
         type=float, help='dropout on features')
 
+    parser.add_argument('--restrict', default=-1,
+        type=int, help='dropout on features')
+
+    parser.add_argument('--head-depth', default=0,
+        type=int, help='depth of head mlp')
+
     parser.add_argument('--visualize', default=False,
         action='store_true', help='visualize trained model')
+
+    parser.add_argument('--long-coef', default=1,
+        type=float, help='long cycle loss coef')
+    parser.add_argument('--skip-coef', default=0,
+        type=float, help='skip cycle loss coef')
+    parser.add_argument('--cal-coef', default=0.0,
+        type=float, help='contrastive affinity')
 
     args = parser.parse_args()
 

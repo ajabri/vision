@@ -88,4 +88,4 @@ class VideoList(data.Dataset):
         return imgs, torch.tensor(0), torch.tensor(0)
 
     def __len__(self):
-        return len(self.jpgfiles) * 1000
+        return len(self.jpgfiles)

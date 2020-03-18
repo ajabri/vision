@@ -24,6 +24,10 @@ class ReflectionPad3d(nn.modules.padding._ReflectionPadNd):
         self.padding = padding
 
 
+class Identity(nn.Module):
+    def forward(self, x):
+        return x
+
 class Conv3DSimplePad(nn.Module):
     def __init__(self,
                  in_planes,
@@ -117,6 +121,28 @@ class Conv3DNoTemporal(nn.Conv3d):
     @staticmethod
     def get_downsample_stride(stride):
         return (1, stride, stride)
+
+class Conv3DChooseTemporal(nn.Conv3d):
+    def __init__(self,
+                 in_planes,
+                 out_planes,
+                 midplanes=None,
+                 T=2,
+                 stride=1,
+                 padding=1):
+        super(Conv3DChooseTemporal, self).__init__(
+            in_channels=in_planes,
+            out_channels=out_planes,
+            kernel_size=(T, 3, 3),
+            stride=(1, stride, stride),
+            padding=(0, padding, padding),
+            bias=False)
+
+    @staticmethod
+    def get_downsample_stride(stride):
+        return (1, stride, stride)
+        
+
 class Conv2Plus1D(nn.Sequential):
 
     def __init__(self,
@@ -463,6 +489,25 @@ def r2d_10(pretrained=False, progress=True, **kwargs):
                          conv_makers=[Conv3DNoTemporalPad] + [Conv3DNoTemporalPad] * 3,
                          layers=[1, 1, 1, 0],
                          stem=BasicStem2D, **kwargs)
+
+def r2d2_10(pretrained=False, progress=True, **kwargs):
+    """Constructor for 18 layer Mixed Convolution network as in
+    https://arxiv.org/abs/1711.11248
+
+    Args:
+        pretrained (bool): If True, returns a model pre-trained on Kinetics-400
+        progress (bool): If True, displays a progress bar of the download to stderr
+
+    Returns:
+        nn.Module: MC3 Network definition
+    """
+    return _video_resnet('r3d_18',
+                         pretrained, progress,
+                         block=BasicBlock,
+                         conv_makers=[Conv3DChooseTemporal] + [Conv3DChooseTemporal] * 3,
+                         layers=[1, 1, 1, 0],
+                         stem=Identity, **kwargs)
+
 
 def r2plus1d_18(pretrained=False, progress=True, **kwargs):
     """Constructor for the 18 layer deep R(2+1)D network as in
