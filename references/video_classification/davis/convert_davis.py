@@ -7,6 +7,10 @@ from PIL import Image
 
 jpglist = []
 
+
+
+
+
 import argparse
 parser = argparse.ArgumentParser()
 parser.add_argument('-o', '--out_folder', default='/scratch/ajabri/davis_results/', type=str)
@@ -73,8 +77,9 @@ def convert_dir(i):
         outname = outfolder + "{:05d}.png".format(j + 1)
         inname  = current_folder + str(i) + '_' + str(j + topk) + '_mask.png'
 
-        print(inname, outname)
+        # print(inname, outname)
         lblimg  = cv2.imread(inname)
+        # print(inname)
         flat_lblimg = lblimg.reshape(-1, 3)
         lblidx  = np.zeros((lblimg.shape[0], lblimg.shape[1]))
         lblidx2  = np.zeros((lblimg.shape[0], lblimg.shape[1]))

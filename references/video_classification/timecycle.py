@@ -91,13 +91,14 @@ class TimeCycle(nn.Module):
         self.args = args
 
         if args is not None:
-            self.kldv_coef = args.kldv_coef
-            self.xent_coef = args.xent_coef
-            self.zero_diagonal = args.zero_diagonal
-            self.dropout_rate = args.dropout
-            self.featdrop_rate = args.featdrop
-            self.model_type = args.model_type
-            self.temperature = args.temp
+            self.kldv_coef = getattr(args, 'kldv_coef', 0)
+            self.xent_coef = getattr(args, 'xent_coef', 0)
+            self.zero_diagonal = getattr(args, 'zero_diagonal', 0)
+            self.dropout_rate = getattr(args, 'dropout', 0)
+            self.featdrop_rate = getattr(args, 'featdrop', 0)
+            self.model_type = getattr(args, 'model_type', 'scratch')
+            self.temperature = getattr(args, 'temp', 1)
+            self.shuffle = getattr(args, 'shuffle', 0)
         else:
             self.kldv_coef = 0
             self.xent_coef = 0
@@ -106,8 +107,9 @@ class TimeCycle(nn.Module):
             self.featdrop_rate = 0
             self.model_type = 'scratch'
             self.temperature = 1
+            self.shuffle = False
         
-        self.encoder = utils.make_encoder(self.model_type)
+        self.encoder = utils.make_encoder(self.model_type).cuda()
 
         self.infer_dims()
 
@@ -148,7 +150,7 @@ class TimeCycle(nn.Module):
         self.dropout = torch.nn.Dropout(p=self.dropout_rate, inplace=False)
         self.featdrop = torch.nn.Dropout(p=self.featdrop_rate, inplace=False)
 
-        self.viz = visdom.Visdom(port=8095, env='%s_%s' % (args.name if args is not None else 'test', '')) #int(time.time())))
+        self.viz = visdom.Visdom(port=8095, env='%s_%s' % (getattr(args, 'name', 'test'), '')) #int(time.time())))
         self.viz.close()
 
         if vis is not None:
@@ -156,7 +158,7 @@ class TimeCycle(nn.Module):
     
     def infer_dims(self):
         # if '2D' in str(type(self.encoder.conv1)):
-        dummy = torch.zeros(1, 3, 1, 224, 224)
+        dummy = torch.zeros(1, 3, 1, 256, 256).to(next(self.encoder.parameters()).device)
         # else:
         #     dummy = torch.Tensor(1, 3, 224, 224)
         dummy_out = self.encoder(dummy)
@@ -168,6 +170,8 @@ class TimeCycle(nn.Module):
     def make_head(self, depth=1):
         head = []
 
+        if depth == -1:
+            return Identity()
         if depth == 0:
             return nn.Linear(self.enc_hid_dim, 128)
             
@@ -223,19 +227,52 @@ class TimeCycle(nn.Module):
 
     def compute_affinity(self, x1, x2, do_dropout=True, zero_diagonal=None):
         B, C, N = x1.shape
+        H = int(N**0.5)
         # assert x1.shape == x2.shape
 
         if do_dropout:
             x1, x2 = self.featdrop(x1), self.featdrop(x2)
+            x1, x2 = F.normalize(x1, dim=1), F.normalize(x2, dim=1)
 
+        # import pdb; pdb.set_trace()
+        # import time
+        t0 = time.time()
+        
+        # fast mm, pretty
         A = torch.einsum('bcn,bcm->bnm', x1, x2)
+        # t1 = time.time()
+
+        # # more flexible
+        # from spatial_correlation_sampler import spatial_correlation_sample
+        # # A_s = self.scorr(x1.view(B, C, int(N**0.5), int(N**0.5)).contiguous(), x2.view(B, C, int(N**0.5), int(N**0.5)).contiguous())     
+
+        # utils.nn_field(A.view(*A.shape[:2], H, H))
+
+        # import pdb; pdb.set_trace()
+
+        # xx1, xx2 = x1.view(B, C, H, H).contiguous(), x2.view(B, C, H, H).contiguous()
+        # A_s = spatial_correlation_sample(xx1, xx2, 1, H, 1, 0, 1)
+                            #    kernel_size=1,
+                            #    patch_size=H,
+                            #    stride=1,
+                            #    padding=0,
+                            #    dilation_patch=1)
+
+        # # cc = utils.Correlation(pad_size=0, kernel_size=1, max_displacement=H, stride1=1, stride2=1, corr_multiply=1)
+        # # A_s = cc(x1.view(B, C, H, H).contiguous(), x2.view(B, C, H, H).contiguous())
+
+        # t2 = time.time()
+        # print(t2-t1, t1-t0)
+        # import pdb; pdb.set_trace()
 
         if self.restrict is not None: #: and do_dropout:
             A = self.restrict(A)
 
         if (zero_diagonal is not False) and self.zero_diagonal:
             A = self.zeroout_diag(A)
-    
+
+        # if self.a_topk:
+        #     A = sel
         # A12 = A.view(A.size(0), 1, H * H, W, W)
         # A21 = A.view(A.size(0), 1, H, H, W * W) 
         # A12  = F.softmax(A, dim=2)
@@ -273,6 +310,9 @@ class TimeCycle(nn.Module):
         H, W = mm.shape[-2:]
 
         if N == 1:  # encode 1 image into feature map, use those vecs as nodes
+            # mm = mm[..., ::2, ::2]
+            # import pdb; pdb.set_trace()
+
             mm = mm.permute(0, -2, -1, 1, 2).contiguous()
             mm = mm.view(-1, *mm.shape[3:])[..., None, None]
             N = mm.shape[0] // B
@@ -284,16 +324,13 @@ class TimeCycle(nn.Module):
         ff = mm.sum(-1).sum(-1) / (H*W)
         # ff = torch.einsum('ijklm->ijk', ff) / ff.shape[-1]*ff.shape[-2] 
 
-        # import pdb; pdb.set_trace()
-
         ff = self.selfsim_fc(ff.transpose(-1, -2)).transpose(-1,-2)
+
         ff = F.normalize(ff, p=2, dim=1)
     
         # reshape to add back batch and num node dimensions
         ff = ff.view(B, N, ff.shape[1], T).permute(0, 2, 3, 1)
         mm = mm.view(B, N, *mm.shape[1:])
-
-        # import pdb; pdb.set_trace()
 
         return ff, mm
 
@@ -301,7 +338,6 @@ class TimeCycle(nn.Module):
     def forward(self, x, orig=None, just_feats=False, visualize=False):
         # x = x.cpu() * 0 + torch.randn(x.shape)
         # x = x.cuda()
-
         # orig = orig.cpu() * 0 + torch.randn(orig.shape)
         # orig = orig.cuda()
         
@@ -313,6 +349,8 @@ class TimeCycle(nn.Module):
         B, T, C, H, W = x.shape
         _N, C = C//3, 3
 
+        # x = F.dropout(x)
+    
         if _N == 1 and visualize:
             # patchify with unfold
             _sz, res = 80, 10
@@ -337,11 +375,22 @@ class TimeCycle(nn.Module):
             # import pdb; pdb.set_trace()
         else:
             x = x.transpose(1,2).view(B, _N, C, T, H, W)
+
+            if self.shuffle > np.random.random():
+                shuffle = torch.randperm(B*_N)
+                x = x.reshape(B*_N, C, T, H, W)[shuffle]
+                x = x.view(B, _N, C, T, H, W)
+                
             ff, mm = self.pixels_to_nodes(x)
+
+        # h = w = int(ff.shape[-1]**0.5)
+        # _ff = ff.view(*ff.shape[:-1], h, w)
         
         # import pdb; pdb.set_trace()
+
         if just_feats:
-            return ff, mm
+            return ff, ff.view(*ff.shape[:-1], h, w)
+
         B, C, T, N = ff.shape
 
         A12s = []
@@ -361,14 +410,20 @@ class TimeCycle(nn.Module):
                     if not self.viz.win_exists(pg_win, env=self.viz.env+'_pg') or visualize:
                         tviz = 0
                         self.viz.clear_event_handlers(pg_win)
-                        A, AA, log_AA, A12, A21 = self.compute_affinity(ff[i:i+1, :, tviz], ff[i:i+1, :, tviz], do_dropout=False)
-                        pg = utils.PatchGraph(self.viz, x[i, :, :, tviz], A[0], win=pg_win, orig=orig)
-                        # import pdb; pdb.set_trace()
+                        A, AA, log_AA, A12, A21 = self.compute_affinity(ff[i:i+1, :, tviz], ff[i:i+1, :, tviz+1], do_dropout=False)
+                        pg = utils.PatchGraph(self.viz,
+                            x[i, :, :, tviz:tviz+2].transpose(1, 2),
+                            A[0], win=pg_win, orig=orig)
 
         if len(t_pairs) > 0:
 
             for (t1, t2) in t_pairs:
                 f1, f2 = ff[:, :, t1], ff[:, :, t2]
+
+                # import pdb; pdb.set_trace()
+
+                # cv2.drawMatches(img1, kps, img2,kps,matches[:10],None, flags=2)
+
 
                 A, AA, log_AA, A12, A21 = self.compute_affinity(f1, f2)
                 log_AA = log_AA.view(-1, log_AA.shape[-1])
@@ -390,9 +445,10 @@ class TimeCycle(nn.Module):
                     AAs.append(AA)
 
                 # _AA = AA.view(-1, H * W, H, W)
-                if np.random.random() < 0.001 or visualize:
+                if np.random.random() < 0.005 or visualize:
                     self.viz.text('%s %s' % (t1, t2), opts=dict(height=1, width=10000), win='div')
                     self.visualize_frame_pair(x, ff, mm, t1, t2)
+
 
             #########################################################
             # Affinity contrastive
@@ -553,18 +609,29 @@ class TimeCycle(nn.Module):
         # # self.viz.image((flows[0]).transpose(2, 0, 1))
 
         # import pdb; pdb.set_trace()
+        if (len(x.shape) == 6 and x.shape[1] == 1):
+            x = x.squeeze(1)
 
         if len(x.shape) < 6:
             # IMG VIZ
             # X here is B x C x T x H x W
-            x1, x2 = x[0, :, t1], x[0, :, t2]
+            x1, x2 = x[0, :, t1].clone(), x[0, :, t2].clone()
+            x1 -= x1.min(); x1 /= x1.max()
+            x2 -= x2.min(); x2 /= x2.max()
+
             xx = torch.stack([x1, x2]).detach().cpu()
-            xx -= xx.min(); xx /= xx.max()
             self.viz.images(xx, win='imgs')
             # self._viz.patches(xx, A)
 
+            # Keypoint Correspondences
+            kp_corr = utils.draw_matches(f1[0], f2[0], x1, x2)
+
+            self.viz.image(kp_corr, win='kpcorr')
+
             # # PCA VIZ
-            pca_ff = utils.pca_feats(torch.stack([f1[0], f2[0]]).detach().cpu())
+            spatialize = lambda xx: xx.view(*xx.shape[:-1], int(xx.shape[-1]**0.5), int(xx.shape[-1]**0.5))
+            ff1 , ff2 = spatialize(f1[0]), spatialize(f2[0])
+            pca_ff = utils.pca_feats(torch.stack([ff1,ff2]).detach().cpu())
             pca_ff = utils.make_gif(pca_ff, outname=None)
             self.viz.images(pca_ff.transpose(0, -1, 1, 2), win='pcafeats')
         else:
@@ -592,3 +659,4 @@ class TimeCycle(nn.Module):
         
         # img_grid = cv2.resize(img_grid.permute(1, 2, 0).cpu().detach().numpy(), (1000, 1000), interpolation=cv2.INTER_NEAREST).transpose(2, 0, 1)
         self.viz.images(img_grid, win='lossvis')
+

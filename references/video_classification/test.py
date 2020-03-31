@@ -8,6 +8,7 @@ import time
 import random
 import cv2
 import imageio
+import utils
 
 import numpy as np
 
@@ -43,7 +44,7 @@ def str_to_bool(v):
 parser = argparse.ArgumentParser(description='PyTorch ImageNet Training')
 
 # Datasets
-parser.add_argument('-j', '--workers', default=4, type=int, metavar='N',
+parser.add_argument('--workers', default=4, type=int, metavar='N',
                     help='number of data loading workers (default: 4)')
 parser.add_argument('--resume', default='', type=str, metavar='PATH',
                     help='path to latest checkpoint (default: none)')
@@ -51,10 +52,9 @@ parser.add_argument('--resume', default='', type=str, metavar='PATH',
 parser.add_argument('--manualSeed', type=int, help='manual seed')
 parser.add_argument('-e', '--evaluate', dest='evaluate', action='store_true',
                     help='evaluate model on validation set')
-parser.add_argument('--pretrained', default='', type=str, metavar='PATH',
-                    help='use pre-trained model')
+
 #Device options
-parser.add_argument('--gpu-id', default='0,1,2,3', type=str,
+parser.add_argument('--gpu-id', default='0', type=str,
                     help='id(s) for CUDA_VISIBLE_DEVICES')
 parser.add_argument('--batchSize', default=1, type=int,
                     help='batchSize')
@@ -81,7 +81,8 @@ parser.add_argument('--save-path', default='./results', type=str)
 parser.add_argument('--visdom', default=False, action='store_true')
 parser.add_argument('--server', default='localhost', type=str)
 parser.add_argument('--model-type', default='scratch', type=str)
-
+parser.add_argument('--head-depth', default=0, type=int,
+                    help='')
 args = parser.parse_args()
 params = {k: v for k, v in args._get_kwargs()}
 
@@ -93,9 +94,9 @@ params['imgSize'] = params['cropSize']
 
 
 # Use CUDA
-# os.environ['CUDA_VISIBLE_DEVICES'] = args.gpu_id
+os.environ['CUDA_VISIBLE_DEVICES'] = args.gpu_id
 use_cuda = torch.cuda.is_available()
-args.gpu_id = os.getenv('CUDA_VISIBLE_DEVICES')
+# args.gpu_id = os.getenv('CUDA_VISIBLE_DEVICES')
 print(args.gpu_id)
 
 import visdom
@@ -110,17 +111,6 @@ torch.manual_seed(args.manualSeed)
 if use_cuda:
     torch.cuda.manual_seed_all(args.manualSeed)
 
-
-def partial_load(pretrained_dict, model):
-    model_dict = model.state_dict()
-
-    # 1. filter out unnecessary keys
-    pretrained_dict = {k: v for k, v in pretrained_dict.items() if k in model_dict}
-    print('Loading keys: ',  pretrained_dict.keys())
-    # 2. overwrite entries in the existing state dict
-    model_dict.update(pretrained_dict)
-    # 3. load the new state dict
-    model.load_state_dict(model_dict)
     
 class Wrap(nn.Module):
     def __init__(self, model):
@@ -144,10 +134,12 @@ def main():
     global best_loss
     start_epoch = 0  # start from epoch 0 or last checkpoint epoch
     
-    model = tc.TimeCycle()
+    model = tc.TimeCycle(
+        args
+    ).cuda()
     model = Wrap(model)
     
-    params['mapSize'] = model(torch.zeros(1, 10, 3, args.cropSize, args.cropSize), None, True, func='forward')[1].shape[-2:]
+    params['mapSize'] = model(torch.zeros(1, 10, 3, args.cropSize, args.cropSize).cuda(), None, True, func='forward')[1].shape[-2:]
 
     val_loader = torch.utils.data.DataLoader(
         davis.DavisSet(params, is_train=False),
@@ -162,11 +154,8 @@ def main():
     if os.path.isfile(args.resume):
         print('==> Resuming from checkpoint..')
         checkpoint = torch.load(args.resume)
-        # partial_load(checkpoint['model'], model)
-        import pdb; pdb.set_trace()
-
         # model.model.load_state_dict(checkpoint['model'])
-        partial_load(checkpoint['model'], model.model)
+        utils.partial_load(checkpoint['model'], model.model)
 
         del checkpoint
     
@@ -201,7 +190,6 @@ def test(val_loader, model, epoch, use_cuda):
     end = time.time()
     
     job_args = []
-    print('Beginning')
 
     n_context = params['videoLen']
     topk_vis = args.topk_vis
@@ -250,7 +238,7 @@ def test(val_loader, model, epoch, use_cuda):
                 predlbls = (weights.unsqueeze(-1)/T * predlbls.view(T, topk_vis, H, W, L)).sum(0).sum(0)
 
             img_now = imgs_toprint[it + n_context].permute(1,2,0).numpy() * 255
-            print(time.time()-t06, 'lbl proc', t06-t05, 'argsorts')
+            # print(time.time()-t06, 'lbl proc', t06-t05, 'argsorts')
 
             # normalize across pixels?? labels distribution...
             # import pdb; pdb.set_trace()
@@ -332,7 +320,7 @@ def test(val_loader, model, epoch, use_cuda):
         #     imname  = save_path + str(batch_idx) + '_' + str(t) + '_frame.jpg'
         #     imageio.imwrite(imname, img_now.astype(np.uint8))
     
-        print('printed images', time.time()-t00)
+        # print('printed images', time.time()-t00)
 
         ##################################################################
         # Compute image features
@@ -348,6 +336,7 @@ def test(val_loader, model, epoch, use_cuda):
         # feats = torch.cat(feats, dim=1)
         
         nodes, feats = model.module(imgs_total, None, True, func='forward')
+        # feats = 
         feats = feats.detach().squeeze(1)
         feats = torch.nn.functional.normalize(feats, dim=1)
 
@@ -361,7 +350,7 @@ def test(val_loader, model, epoch, use_cuda):
             nowlbl = lbls_tensor[0][t]
             imname  = save_path + str(batch_idx) + '_' + str(t) + '_label.jpg'
             imageio.imwrite(imname, nowlbl.numpy().astype(np.uint8))
-        print('wrote frames and labels')
+        # print('wrote frames and labels')
         
         ##################################################################
         # Compute correlation features
@@ -376,6 +365,8 @@ def test(val_loader, model, epoch, use_cuda):
             (torch.arange(n_context)[None].repeat(im_num, 1) + 
                 torch.arange(im_num)[:, None])[:, 1:]],
                 dim=-1)
+
+        feats = feats.cpu()
         keys, query = feats[:, :, indices], feats[:, :, n_context:]
 
         H, W = query.shape[-2:]
@@ -389,7 +380,7 @@ def test(val_loader, model, epoch, use_cuda):
         bsize = 10
         for b in range(0, keys.shape[2], bsize):
 
-            A = torch.einsum('ijklmn,ijkop->iklmnop', keys[:, :, b:b+bsize], query[:, :, b:b+bsize]).detach()
+            A = torch.einsum('ijklmn,ijkop->iklmnop', keys[:, :, b:b+bsize].cuda(), query[:, :, b:b+bsize].cuda())
             A[0, :, 1:] *= D
             A = softmax_base(A[0])[None]
             # As.append(A)

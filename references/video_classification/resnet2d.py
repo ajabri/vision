@@ -23,6 +23,27 @@ model_urls = {
     'wide_resnet101_2': 'https://download.pytorch.org/models/wide_resnet101_2-32ee1156.pth',
 }
 
+import numpy as np
+class RandomPadder(nn.Module):
+    def __init__(self, padding):
+        super(RandomPadder, self).__init__()
+        if isinstance(padding, int):
+            self.padding = [padding] * 4
+        else:
+            self.padding = padding
+
+    def forward(self, input):
+        # mode = np.random.choice(['constant', 'replicate', 'circular', 'reflect'])
+        mode = 'reflect'
+
+        if mode == 'constant':
+            return torch.nn.functional.pad(input, self.padding, mode, np.random.random() - 0.5)
+
+        return torch.nn.functional.pad(input, self.padding, mode)
+
+    def extra_repr(self):
+        return '{}'.format(self.padding)
+        
 
 def conv3x3(in_planes, out_planes, stride=1, groups=1, dilation=1):
     """3x3 convolution with padding"""
@@ -31,7 +52,8 @@ def conv3x3(in_planes, out_planes, stride=1, groups=1, dilation=1):
                          padding=dilation, groups=groups, bias=False, dilation=dilation)
     else:
         return nn.Sequential(
-            nn.ReflectionPad2d(dilation),
+            RandomPadder(dilation),
+            # nn.Dropout(p=0.05),
             nn.Conv2d(in_planes, out_planes, kernel_size=3, stride=stride,
                         groups=groups, bias=False, dilation=dilation)
         )
@@ -155,7 +177,7 @@ class ResNet(nn.Module):
                                    bias=False)
         else:
             self.conv1 = nn.Sequential(
-                nn.ReflectionPad2d(3),
+                RandomPadder(3),
                 nn.Conv2d(3, self.inplanes, kernel_size=7, stride=2, bias=False)
             )
 

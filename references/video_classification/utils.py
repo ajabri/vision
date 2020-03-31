@@ -361,14 +361,28 @@ import skimage
 
 import utils
 
+def partial_load(pretrained_dict, model):
+    model_dict = model.state_dict()
+
+    # 1. filter out unnecessary keys
+    filtered_dict = {k: v for k, v in pretrained_dict.items() if k in model_dict}
+    skipped_keys = [k for k in pretrained_dict if k not in filtered_dict]
+    print('Skipped keys: ',  skipped_keys)
+
+    # 2. overwrite entries in the existing state dict
+    model_dict.update(filtered_dict)
+    # 3. load the new state dict
+    model.load_state_dict(model_dict)
+
+
 def pca_feats(ff, solver='auto', img_normalize=True):
     ## expect ff to be   N x C x H x W
-    
+        
     N, C, H, W = ff.shape
     pca = PCA(
         n_components=3,
         svd_solver=solver,
-        whiten=False
+        whiten=True
     )
 #     print(ff.shape)
     ff = ff.transpose(1, 2).transpose(2, 3)
@@ -383,6 +397,7 @@ def pca_feats(ff, solver='auto', img_normalize=True):
 
     if img_normalize:
         pca_ff = (pca_ff - pca_ff.min()) / (pca_ff.max() - pca_ff.min())
+
 
     return pca_ff
 
@@ -411,6 +426,34 @@ from matplotlib import cm
 import time
 import cv2
 
+def draw_matches(x1, x2, i1, i2):
+    # x1, x2 = f1, f2/
+    detach = lambda x: x.detach().cpu().numpy().transpose(1,2,0) * 255
+    i1, i2 = detach(i1), detach(i2)
+    i1, i2 = cv2.resize(i1, (400, 400)), cv2.resize(i2, (400, 400))
+
+    for check in [True]:
+        bf = cv2.BFMatcher(cv2.NORM_L2, crossCheck=check)
+        # matches = bf.match(x1.permute(0,2,1).view(-1, 128).cpu().detach().numpy(), x2.permute(0,2,1).view(-1, 128).cpu().detach().numpy())
+
+        h = int(x1.shape[-1]**0.5)
+        matches = bf.match(x1.t().cpu().detach().numpy(), x2.t().cpu().detach().numpy())
+
+        scale = i1.shape[-2] / h
+        grid = torch.stack([torch.arange(0, h)[None].repeat(h, 1), torch.arange(0, h)[:, None].repeat(1, h)])
+        
+        grid = grid.view(2, -1)
+        grid = grid * scale + scale//2
+
+        kps = [cv2.KeyPoint(grid[0][i], grid[1][i], 1) for i in range(grid.shape[-1])]
+
+        matches = sorted(matches, key = lambda x:x.distance)
+
+        # img1 = img2 = np.zeros((40, 40, 3))
+        out = cv2.drawMatches(i1, kps, i2,kps,matches[:], None, flags=2).transpose(2,0,1)
+
+    return out
+
 class PatchGraph(object):
     
     color = cm.get_cmap('jet')
@@ -421,33 +464,56 @@ class PatchGraph(object):
         y, x = i // self.W, i % self.W
         cx, cy = [int((self.w + self.pad) * (x  + 0.5)), int((self.h + self.pad) * (y  + 0.5))]
 
-        # if self.orig is None:
-        img1 = self.grid[...,:-self.pad, :-self.pad] if self.pad > 0 else self.grid
-        # else:
-        img2 = self.orig
+        def _blend(x):
+            x = x[...,:-self.pad, :-self.pad] if self.pad > 0 else x
+            x = (0.5 * self.maps[i] + 0.5 * x).copy() * 255
+            return x
 
-        img1 = (0.5 * self.maps[i] + 0.5 * img1).copy() * 255
-        img2 = (0.5 * self.maps[i] + 0.5 * img2).copy() * 255
-
+        img1 = self.grid[0]*255.0
+        img2 = _blend(self.grid[1])
         img1[:, cy-5:cy+5, cx-5:cx+5] = 255
-        img2[:, cy-5:cy+5, cx-5:cx+5] = 255
-        # img = cv2.circle(img.transpose(1,2,0), ctr, 10, (255, 255, 255), -1).get().transpose(2, 0, 1)
+        # import pdb; pdb.set_trace()
 
-        return img1, img2
+        return np.concatenate([img1, img2], axis=-1), None
 
     def update(self):
         self.viz.image(self.curr[0], win=self.win_id, env=self.viz.env+'_pg')
         # self.viz.image(self.curr[1], win=self.win_id2, env=self.viz.env+'_pg')
+
+    def make_canvas(self, I, orig, N):
+        # import pdb; pdb.set_trace()
+        # if N == 1:
+        #     grid = [cv2.resize(o.numpy().transpose(1,2,0), (800, 800), interpolation=cv2.INTER_LINEAR).transpose(2, 0, 1) for o in orig]
+        # else:
+        grid = []
+        for i in range(I.shape[1]):
+            grid += [torchvision.utils.make_grid(I[:, i], nrow=int(N**0.5), padding=self.pad, pad_value=0).cpu().numpy()]
+        
+        for i in range(len(grid)):
+            grid[i] -= grid[i].min()
+            grid[i] /= grid[i].max()
+        
+        # if orig is not None:
+        #     self.orig = cv2.resize(orig[0].numpy().transpose(1,2,0), self.grid.shape[-2:], interpolation=cv2.INTER_LINEAR).transpose(2, 0, 1)
+        #     self.orig -= self.orig.min()
+        #     self.orig /= self.orig.max()
+        # else:
+        #     self.orig = None
+        
+        return grid
 
     def __init__(self, viz, I, A, win='patchgraph', orig=None):
         self._win = win
         self.viz = viz
         self._birth = time.time()
 
-        _, C, h, w = I.shape
+        P, C, T, h, w = I.shape
         N = A.shape[-1]
         H = W = int(N ** 0.5)
         self.N, self.H, self.W, self.h, self.w = N, H, W, h, w
+
+        if P == 1:
+            self.w, self.h = self.w // W, self.h // H
 
         I = I.cpu()
         orig = orig.cpu()
@@ -459,21 +525,8 @@ class PatchGraph(object):
 
         ####################################################################
         # Construct image data
-        if N == 1:
-            self.grid = cv2.resize(orig[0].numpy().transpose(1,2,0), (800, 800), interpolation=cv2.INTER_LINEAR).transpose(2, 0, 1)
-        else:
-            self.grid = torchvision.utils.make_grid(I, nrow=H, padding=self.pad, pad_value=0).cpu().numpy()
 
-        self.grid -= self.grid.min()
-        self.grid /= self.grid.max()
-        
-        if orig is not None:
-            self.orig = cv2.resize(orig[0].numpy().transpose(1,2,0), self.grid.shape[-2:], interpolation=cv2.INTER_LINEAR).transpose(2, 0, 1)
-            self.orig -= self.orig.min()
-            self.orig /= self.orig.max()
-        else:
-            self.orig = None
-        # import pdb; pdb.set_trace()
+        self.grid = self.make_canvas(I, orig, N)
 
         ####################################################################
         # Construct map data
@@ -484,10 +537,10 @@ class PatchGraph(object):
         # lpad = int(((h-pstride)//2 / orig.shape[-1]) * self.orig.shape[-1])
         # rpad = self.orig.shape[-1] - map_sz - lpad
 
-        map_sz = self.orig.shape[-1]
+        map_sz = self.grid[0].shape[-1]
         lpad, rpad = 0, 0
 
-        zeros = np.zeros(self.orig.shape).transpose(1,2,0)
+        zeros = np.zeros(self.grid[0].shape).transpose(1,2,0)
         maps = []
         for a in A[:, :, :, None].cpu().detach().numpy():
             _a = cv2.resize(a, (map_sz, map_sz), interpolation=cv2.INTER_NEAREST)
@@ -708,9 +761,10 @@ def get_frame_aug(args):
     train_transform = []
 
     if 'cj' in args.frame_aug:
+        _cj = 0.2
         train_transform += [
             transforms.RandomGrayscale(p=0.2),
-            transforms.ColorJitter(0.4, 0.4, 0.4, 0.4),
+            transforms.ColorJitter(_cj, _cj, _cj, _cj),
         ]
 
     if 'flip' in args.frame_aug:
@@ -752,8 +806,9 @@ def get_frame_transform(args):
     
     # import pdb; pdb.set_trace()
     if 'blur' in fts:
-        tt += [torchvision.transforms.ToTensor(), T.GaussianBlurTransform(), torchvision.transforms.ToPILImage()]
-        
+        # tt += [torchvision.transforms.ToTensor(), T.GaussianBlurTransform(), torchvision.transforms.ToPILImage()]
+        tt += [T.BlurTransform()]
+
     # if 'gray' in fts:
     #     tt.append(torchvision.transforms.RandomGrayscale(p=1))
 
@@ -764,9 +819,10 @@ def get_frame_transform(args):
         tt.append(norm_size)
 
     if 'cj' in fts:
+        _cj = 0.2
         tt += [
             transforms.RandomGrayscale(p=0.2),
-            transforms.ColorJitter(0.4, 0.4, 0.4, 0.4),
+            transforms.ColorJitter(_cj, _cj, _cj, _cj),
         ]
 
     if 'flip' in fts:
@@ -797,8 +853,12 @@ def get_frame_transform(args):
     ])
 
     def with_orig(x):
-        # import pdb; pdb.set_trace()
-        return frame_transform_train(x) if not args.visualize else T.PerTimestepTransform(plain1)(x), plain(x[0].transpose(2, 0, 1))
+        if 'numpy' in str(type(x[0])):
+            x = frame_transform_train(x) if not args.visualize else T.PerTimestepTransform(plain1)(x), plain(x[0])
+        else:
+            x = frame_transform_train(x) if not args.visualize else T.PerTimestepTransform(plain1)(x), plain(x[0].permute(2, 0, 1))
+
+        return x
 
     return with_orig
 
@@ -835,6 +895,19 @@ def get_frame_transform(args):
 #     flows = vis_flow(u, v)
 
 #     return flows, u, v
+
+
+def nn_field(A):
+    assert A.ndim == 4
+    assert A.shape[1] == (A.shape[2] * A.shape[3])
+
+    # assume corr is shape N x H * W x W x H
+    nnf = A.argmax(dim=1)
+
+    # nnf = nnf.transpose(-1, -2)
+
+    u = nnf % nnf.shape[-1]
+    v = nnf / nnf.shape[-2] # nnf is an IntTensor so rounds automatically
 
 
 def compute_flow(corr):
@@ -914,17 +987,23 @@ def make_encoder(model_type='scratch'):
     import resnet2d
     import antialiased as aa
     import antialiased.resnet as aa_resnet
+
     if model_type == 'scratch':
         import torchvision.models.video.resnet as _resnet3d
         # resnet = resnet3d.r2d_10(pretrained=False)
-        resnet = resnet2d.resnet18(pretrained=False,)
+
         # resnet = aa_resnet.resnet18(pretrained=False)
-        # norm_layer=lambda x: nn.GroupNorm(1, x))
+        # norm_layer=lambda x: nn.GroupNorm(1, x)
         # resnet = resnet2d.resnet34(pretrained=False,)        
 
+        resnet = resnet2d.resnet18(pretrained=False)#, norm_layer=norm_layer)
+
+    elif model_type == 'aaresnet':
+        resnet = aa_resnet.resnet18(pretrained=False)
+        
     elif model_type == 'bagnet':
         import bagnet
-        resnet = bagnet.bagnet17(pretrained=True)
+        resnet = bagnet.bagnet33(pretrained=True)
         
     elif model_type == 'imagenet':
         resnet2d._REFLECT_PAD = False
@@ -933,6 +1012,8 @@ def make_encoder(model_type='scratch'):
     elif model_type == 'moco':
         resnet = load_selfsup_model().encoder
 
+    else: 
+        assert False, 'invalid args.model_type'
         # self.resnet = _resnet3d.r3d_18(pretrained=True)
         # self.resnet = resnet3d.r2d_18(pretrained=True)
 
@@ -998,3 +1079,66 @@ def _initialize_weights(model):
             nn.init.constant_(m.bias, 0)
 
     return model
+
+
+import torch
+from torch.nn.modules.module import Module
+from torch.autograd import Function
+import correlation_cuda
+
+class CorrelationFunction(Function):
+
+    def __init__(self, pad_size=3, kernel_size=3, max_displacement=20, stride1=1, stride2=2, corr_multiply=1):
+        super(CorrelationFunction, self).__init__()
+        self.pad_size = pad_size
+        self.kernel_size = kernel_size
+        self.max_displacement = max_displacement
+        self.stride1 = stride1
+        self.stride2 = stride2
+        self.corr_multiply = corr_multiply
+        # self.out_channel = ((max_displacement/stride2)*2 + 1) * ((max_displacement/stride2)*2 + 1)
+
+    def forward(self, input1, input2):
+        self.save_for_backward(input1, input2)
+
+        with torch.cuda.device_of(input1):
+            rbot1 = input1.new()
+            rbot2 = input2.new()
+            output = input1.new()
+
+            correlation_cuda.forward(input1, input2, rbot1, rbot2, output, 
+                self.pad_size, self.kernel_size, self.max_displacement,self.stride1, self.stride2, self.corr_multiply)
+
+        return output
+
+    def backward(self, grad_output):
+        input1, input2 = self.saved_tensors
+
+        with torch.cuda.device_of(input1):
+            rbot1 = input1.new()
+            rbot2 = input2.new()
+
+            grad_input1 = input1.new()
+            grad_input2 = input2.new()
+
+            correlation_cuda.backward(input1, input2, rbot1, rbot2, grad_output, grad_input1, grad_input2,
+                self.pad_size, self.kernel_size, self.max_displacement,self.stride1, self.stride2, self.corr_multiply)
+
+        return grad_input1, grad_input2
+
+
+class Correlation(Module):
+    def __init__(self, pad_size=0, kernel_size=0, max_displacement=0, stride1=1, stride2=2, corr_multiply=1):
+        super(Correlation, self).__init__()
+        self.pad_size = pad_size
+        self.kernel_size = kernel_size
+        self.max_displacement = max_displacement
+        self.stride1 = stride1
+        self.stride2 = stride2
+        self.corr_multiply = corr_multiply
+
+    def forward(self, input1, input2):
+
+        result = CorrelationFunction(self.pad_size, self.kernel_size, self.max_displacement,self.stride1, self.stride2, self.corr_multiply)(input1, input2)
+
+        return result

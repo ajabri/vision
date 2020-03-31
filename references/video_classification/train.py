@@ -133,9 +133,7 @@ def main(args):
     print("torchvision version: ", torchvision.__version__)
 
     device = torch.device(args.device)
-
     torch.backends.cudnn.benchmark = True
-
 
     ##### VIDEO SPECIFIC ##########
     # Data loading code
@@ -229,10 +227,7 @@ def main(args):
     import patchcycle as pc
 
     # model = resnet.__dict__[args.model](pretrained=args.pretrained)
-
-    model = tc.TimeCycle(args, vis=vis)
-    
-    model.to(device)
+    model = tc.TimeCycle(args, vis=vis).to(device)
 
     if args.distributed and args.sync_bn:
         model = torch.nn.SyncBatchNorm.convert_sync_batchnorm(model)
@@ -268,6 +263,11 @@ def main(args):
         model = torch.nn.parallel.DataParallel(model)
         model_without_ddp = model.module
     
+    ########################### 
+    if args.partial_reload:
+        checkpoint = torch.load(args.partial_reload, map_location='cpu')
+        utils.partial_load(checkpoint['model'], model_without_ddp)        
+
     if args.reload:
         checkpoint = torch.load(args.reload, map_location='cpu')
         model_without_ddp.load_state_dict(checkpoint['model'])
@@ -282,6 +282,7 @@ def main(args):
         optimizer.load_state_dict(checkpoint['optimizer'])
         lr_scheduler.load_state_dict(checkpoint['lr_scheduler'])
         args.start_epoch = checkpoint['epoch'] + 1
+    ########################### 
 
     if args.visualize:
         visualize(model, data_loader, device, vis=vis)
@@ -348,12 +349,13 @@ def parse_args():
                         dest='weight_decay')
 
     parser.add_argument('--lr-milestones', nargs='+', default=[20, 30, 40], type=int, help='decrease lr on milestones')
-    parser.add_argument('--lr-gamma', default=0.1, type=float, help='decrease lr by a factor of lr-gamma')
+    parser.add_argument('--lr-gamma', default=0.3, type=float, help='decrease lr by a factor of lr-gamma')
     parser.add_argument('--lr-warmup-epochs', default=0, type=int, help='number of warmup epochs')
     parser.add_argument('--print-freq', default=10, type=int, help='print frequency')
     parser.add_argument('--output-dir', default='auto', help='path where to save')
     parser.add_argument('--resume', default='', help='resume from checkpoint')
-    parser.add_argument('--reload', default='', help='resume from checkpoint')
+    parser.add_argument('--reload', default='', help='reload net from checkpoint without optimizer state')
+    parser.add_argument('--partial-reload', default='', help='reload net from checkpoint, ignoring keys that are not in current model')
     parser.add_argument('--start-epoch', default=0, type=int, metavar='N',
                         help='start epoch')
     
@@ -432,6 +434,9 @@ def parse_args():
         type=float, help='skip cycle loss coef')
     parser.add_argument('--cal-coef', default=0.0,
         type=float, help='contrastive affinity')
+
+    parser.add_argument('--shuffle', default=0.0,
+        type=float, help='shuffle patches across instances for different negatives')
 
     args = parser.parse_args()
 

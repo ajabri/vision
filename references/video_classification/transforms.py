@@ -80,6 +80,19 @@ def gaussian_kernel(size, sigma=2., dim=2, channels=3):
 
     return kernel
 
+from PIL import ImageFilter
+class BlurTransform(object):
+    """Gaussian blur augmentation in SimCLR https://arxiv.org/abs/2002.05709"""
+
+    def __init__(self, sigma=[.1, 2.]):
+        self.sigma = sigma
+
+    def __call__(self, x):
+        sigma = random.uniform(self.sigma[0], self.sigma[1])
+        x = x.filter(ImageFilter.GaussianBlur(radius=sigma))
+        return x
+
+
 import itertools
 class GaussianBlurTransform(object):
     def __init__(self, sizes=[2*n + 1 for n in range(10)], sigmas=[i+1 for i in range(7)]):

@@ -116,8 +116,9 @@ class BagNet(nn.Module):
         x = self.layer1(x)
         x = self.layer2(x)
         x = self.layer3(x)
-        
-        # x = self.layer4(x)
+        # import pdb; pdb.set_trace()
+        x = self.layer4(x)
+        # x = x[:, :, ::2, ::2]
 
         # if self.avg_pool:
         #     x = nn.AvgPool2d(x.size()[2], stride=1)(x)

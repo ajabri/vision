@@ -1,0 +1,1 @@
+CUDA_VISIBLE_DEVICES=1 python test.py --filelist /data/ajabri/davis/DAVIS/vallist.txt --resume checkpoints/kinetics-_dataset\:kinetics-xent_coef\:1-kldv_coef\:0-dropout\:0.3-clip_len\:4-frame_transforms\:cj-frame_aug\:grid-zero_diagonal\:False-npatch\:5-nrel\:10-pstride\:\[1.0\,\ 1.0\]/model_3.pth   --topk_vis 3   --videoLen 4 --temperature 0.01 --radius 2.5 --all-nn
