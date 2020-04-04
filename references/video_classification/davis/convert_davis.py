@@ -122,4 +122,4 @@ def convert_dir(i):
 import multiprocessing as mp
 pool = mp.Pool(processes=10)
 results = pool.map(convert_dir, range(len(jpglist)))
-print(results)
+# print(results)

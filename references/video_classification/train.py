@@ -60,6 +60,8 @@ def train_one_epoch(model, criterion, optimizer, lr_scheduler, data_loader, devi
     for video, orig in metric_logger.log_every(data_loader, print_freq, header):
         start_time = time.time()
 
+        import pdb; pdb.set_trace()
+        
         video = video.to(device)
         output, xent_loss, kldv_loss, diagnostics = model(video, orig=orig)
         loss = (xent_loss.mean() + kldv_loss.mean())
@@ -71,9 +73,10 @@ def train_one_epoch(model, criterion, optimizer, lr_scheduler, data_loader, devi
             for k,v in diagnostics.items():
                 vis.log(k, v.mean().item())
 
-        if checkpoint_fn is not None and np.random.random() < 0.005:
+        if checkpoint_fn is not None and np.random.random() < 0.5:
             checkpoint_fn()
 
+ 
         # output, xent_loss, kldv_loss = model(video)
         # loss = (kldv_loss.mean() + xent_loss.mean()) #+ kldv_loss
         # print(loss)
@@ -96,6 +99,8 @@ def train_one_epoch(model, criterion, optimizer, lr_scheduler, data_loader, devi
         # metric_logger.meters['acc5'].update(acc5.item(), n=batch_size)
         metric_logger.meters['clips/s'].update(batch_size / (time.time() - start_time))
         lr_scheduler.step()
+
+    checkpoint_fn()
 
 
 
@@ -127,7 +132,9 @@ def main(args):
 
     vis = utils.Visualize(args)
 
-    utils.init_distributed_mode(args)
+    # utils.init_distributed_mode(args)
+    args.distributed = False
+
     print(args)
     print("torch version: ", torch.__version__)
     print("torchvision version: ", torchvision.__version__)
@@ -193,10 +200,13 @@ def main(args):
         if args.cache_dataset and 'kinetics' in args.data_path.lower():
             print("Saving dataset_train to {}".format(cache_path))
             utils.mkdir(os.path.dirname(cache_path))
+            dataset.transform = None
             utils.save_on_master((dataset, traindir), cache_path)
     
     if hasattr(dataset, 'video_clips'):
         dataset.video_clips.compute_clips(args.clip_len, 1, frame_rate=15)
+
+    import pdb; pdb.set_trace()
 
     print("Took", time.time() - st)
 
@@ -315,6 +325,13 @@ def main(args):
         train_one_epoch(model, criterion, optimizer, lr_scheduler, data_loader,
                         device, epoch, args.print_freq, args.apex,
                         vis=vis, checkpoint_fn=save_model_checkpoint)
+
+        # eval on davis
+        from run_test import test as davis_test
+        scores = davis_test(os.path.join(args.output_dir, 'model_{}.pth'.format(epoch)), gpu=1)
+        vis.log('Davis J mean', scores['J']['mean'])                    
+        vis.log('Davis F mean', scores['F']['mean'])
+
         # evaluate(model, criterion, data_loader_test, device=device)
 
 

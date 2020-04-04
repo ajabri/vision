@@ -158,14 +158,14 @@ class TimeCycle(nn.Module):
     
     def infer_dims(self):
         # if '2D' in str(type(self.encoder.conv1)):
-        dummy = torch.zeros(1, 3, 1, 256, 256).to(next(self.encoder.parameters()).device)
+        in_sz = 256
+        dummy = torch.zeros(1, 3, 1, in_sz, in_sz).to(next(self.encoder.parameters()).device)
         # else:
         #     dummy = torch.Tensor(1, 3, 224, 224)
         dummy_out = self.encoder(dummy)
 
         self.enc_hid_dim = dummy_out.shape[1]
-
-        # import pdb; pdb.set_trace()
+        self.map_scale = in_sz // dummy_out.shape[-1]
 
     def make_head(self, depth=1):
         head = []
@@ -325,7 +325,6 @@ class TimeCycle(nn.Module):
         # ff = torch.einsum('ijklm->ijk', ff) / ff.shape[-1]*ff.shape[-2] 
 
         ff = self.selfsim_fc(ff.transpose(-1, -2)).transpose(-1,-2)
-
         ff = F.normalize(ff, p=2, dim=1)
     
         # reshape to add back batch and num node dimensions
@@ -383,12 +382,9 @@ class TimeCycle(nn.Module):
                 
             ff, mm = self.pixels_to_nodes(x)
 
-        # h = w = int(ff.shape[-1]**0.5)
         # _ff = ff.view(*ff.shape[:-1], h, w)
-        
-        # import pdb; pdb.set_trace()
-
         if just_feats:
+            h, w = int(np.ceil(x.shape[-2] / self.map_scale)), int(np.ceil(x.shape[-1] / self.map_scale))
             return ff, ff.view(*ff.shape[:-1], h, w)
 
         B, C, T, N = ff.shape

@@ -633,10 +633,11 @@ class PatchGraph(object):
 
 class Visualize(object):
     def __init__(self, args, suffix='metrics', log_interval=2*60):
+        self._env_name = "%s_%s" % (args.name, suffix)
         self.vis = visdom.Visdom(
             port=args.port,
             server='http://%s' % args.server,
-            env="%s_%s" % (args.name, suffix),
+            env=self._env_name,
         )
         self.data = dict()
 
@@ -668,6 +669,8 @@ class Visualize(object):
     def nn_patches(self, P, A_k, prefix='', N=10, K=20):
         nn_patches(self.vis, P, A_k, prefix, N, K)
 
+    def save(self):
+        self.vis.save(self._env_name)
 
 def get_stride(im_sz, p_sz, res):
     stride = (im_sz - p_sz)//(res-1)
@@ -1084,7 +1087,7 @@ def _initialize_weights(model):
 import torch
 from torch.nn.modules.module import Module
 from torch.autograd import Function
-import correlation_cuda
+# import correlation_cuda
 
 class CorrelationFunction(Function):
 

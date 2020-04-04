@@ -116,7 +116,7 @@ class DavisSet(data.Dataset):
         self.filelist = params['filelist']
         self.imgSize = params['imgSize']
         self.videoLen = params['videoLen']
-        self.mapSize = params['mapSize']
+        self.mapScale = params['mapScale']
 
         f = open(self.filelist, 'r')
         self.jpgfiles = []
@@ -153,7 +153,8 @@ class DavisSet(data.Dataset):
 
         frame_num = len(os.listdir(folder_path)) + self.videoLen
 
-        mean, std = (0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010)
+        # mean, std = (0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010)
+        mean, std = [0.485, 0.456, 0.406], [0.229, 0.224, 0.225]
 
         
         lbl_paths = []
@@ -173,31 +174,31 @@ class DavisSet(data.Dataset):
                 lbl_path = label_path + "/{:05d}.png".format(i - self.videoLen)
             
             img = load_image(img_path)  # CxHxW
-            
+            lblimg  = cv2.imread(lbl_path)
+
             # print('loaded', i, time.time() - t00)
 
             ht, wd = img.size(1), img.size(2)
-            newh, neww = ht, wd
+            if self.imgSize > 0:
+                newh, neww = ht, wd
 
-            if ht <= wd:
-                ratio  = 1.0 #float(wd) / float(ht)
-                # width, height
-                img = resize(img, int(self.imgSize * ratio), self.imgSize)
-                newh = self.imgSize
-                neww = int(self.imgSize * ratio)
-            else:
-                ratio  = 1.0 #float(ht) / float(wd)
-                # width, height
-                img = resize(img, self.imgSize, int(self.imgSize * ratio))
-                newh = int(self.imgSize * ratio)
-                neww = self.imgSize
+                if ht <= wd:
+                    ratio  = 1.0 #float(wd) / float(ht)
+                    # width, height
+                    img = resize(img, int(self.imgSize * ratio), self.imgSize)
+                    newh = self.imgSize
+                    neww = int(self.imgSize * ratio)
+                else:
+                    ratio  = 1.0 #float(ht) / float(wd)
+                    # width, height
+                    img = resize(img, self.imgSize, int(self.imgSize * ratio))
+                    newh = int(self.imgSize * ratio)
+                    neww = self.imgSize
 
+                lblimg  = cv2.resize(lblimg, (newh, neww), cv2.INTER_NEAREST)
 
             img_orig = img.clone()
             img = color_normalize(img, mean, std)
-
-            lblimg  = cv2.imread(lbl_path)
-            lblimg  = cv2.resize(lblimg, (newh, neww), cv2.INTER_NEAREST)
 
             imgs_orig.append(img_orig)
             imgs.append(img)
@@ -226,11 +227,14 @@ class DavisSet(data.Dataset):
 
         onehots = []
         resizes = []
+
+        rsz_h, rsz_w = img.size(1) // self.mapScale[0], img.size(2) // self.mapScale[1]
+
         for i,p in enumerate(lbl_paths):
             prefix = '/' + '/'.join(p.split('.')[:-1])
             # print(prefix)
             oh_path = "%s_%s.npy" % (prefix, 'onehot')
-            rz_path = "%s_%s.npy" % (prefix, 'size%s' % self.mapSize[0])
+            rz_path = "%s_%s.npy" % (prefix, 'size%sx%s' % (rsz_h, rsz_w))
 
             onehot = try_np_load(oh_path) 
             if onehot is None:
@@ -241,10 +245,10 @@ class DavisSet(data.Dataset):
             resized = try_np_load(rz_path)
             if resized is None:
                 print('computing resized lbl for', rz_path)
-                resized = cv2.resize(np.float32(onehot), (self.mapSize[0], self.mapSize[0]))
+                resized = cv2.resize(np.float32(onehot), (rsz_h, rsz_w))
                 np.save(rz_path, resized)
             
-            onehots.append(onehot )
+            onehots.append(onehot)
             resizes.append(resized)
             # print('frame', i, time.time() - t00)
 

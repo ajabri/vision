@@ -139,7 +139,8 @@ def main():
     ).cuda()
     model = Wrap(model)
     
-    params['mapSize'] = model(torch.zeros(1, 10, 3, args.cropSize, args.cropSize).cuda(), None, True, func='forward')[1].shape[-2:]
+    params['mapScale'] = model(torch.zeros(1, 10, 3, 320, 320).cuda(), None, True, func='forward')[1].shape[-2:]
+    params['mapScale'] = 320 // np.array(params['mapScale'])
 
     val_loader = torch.utils.data.DataLoader(
         davis.DavisSet(params, is_train=False),
@@ -238,6 +239,7 @@ def test(val_loader, model, epoch, use_cuda):
                 predlbls = (weights.unsqueeze(-1)/T * predlbls.view(T, topk_vis, H, W, L)).sum(0).sum(0)
 
             img_now = imgs_toprint[it + n_context].permute(1,2,0).numpy() * 255
+            
             # print(time.time()-t06, 'lbl proc', t06-t05, 'argsorts')
 
             # normalize across pixels?? labels distribution...
@@ -303,8 +305,6 @@ def test(val_loader, model, epoch, use_cuda):
         imgs_set = imgs_total.data
         imgs_set = imgs_set.cpu().numpy()
         imgs_set = imgs_set[0]
-        mean=[0.485, 0.456, 0.406]
-        std=[0.229, 0.224, 0.225]
 
         imgs_toprint = [ii for ii in imgs_orig[0]]
 
@@ -377,7 +377,7 @@ def test(val_loader, model, epoch, use_cuda):
         # import pdb; pdb.set_trace()
 
         As = []
-        bsize = 10
+        bsize = 5
         for b in range(0, keys.shape[2], bsize):
 
             A = torch.einsum('ijklmn,ijkop->iklmnop', keys[:, :, b:b+bsize].cuda(), query[:, :, b:b+bsize].cuda())
