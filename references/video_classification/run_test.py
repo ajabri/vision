@@ -1,5 +1,6 @@
 import os
 import yaml
+import socket
 
 def test(model, L=5, K=2, T=0.01, opts=[], gpu=0):
     #--radius 40  --all-nn 
@@ -18,35 +19,40 @@ def test(model, L=5, K=2, T=0.01, opts=[], gpu=0):
         # import pdb; pdb.set_trace()
 
 
-    outdir = '/data/ajabri/davis_dump/'
+    hostname = socket.gethostname()
+
+    if hostname.startswith('kiwi'):
+        outdir = '/data/ajabri/davis_dump/'   
+        datapath = '/data/ajabri/davis/DAVIS/'
+        davis2017path = '/data/ajabri/davis-2017/'
+    else:
+        outdir = '/scratch/ajabri/data/davis_dump/'   
+        datapath = '/scratch/ajabri/data/davis/'
+        davis2017path = '/scratch/ajabri/data/davis-2017/'
+
     model_name = "L%s_K%s_T%s__M%s_%s" %(L, K, T, model_name, ''.join(opts)) 
 
     opts = ' '.join(opts)
+    cmd = ""
 
-    cmd = '''
-        export PYTHONPATH=/data/ajabri/davis-2017/python/lib/
-    '''
-
-    if not os.path.isdir(f"{outdir}/results_{model_name}") or True:
-        cmd += '''
-            python test.py --filelist /data/ajabri/davis/DAVIS/vallist.txt {model_str} \
+    if not os.path.isdir(f"{outdir}/results_{model_name}"):# or True:
+        cmd += f'''
+            python test.py --filelist {datapath}/vallist.txt {model_str} \
                 --topk_vis {K}   --videoLen {L} --temperature {T} --save-path {outdir}/results_{model_name} \
-                --workers 5  {opts} --gpu-id {gpu} && \
-            '''.format(model_str=model_str, model_name=model_name, K=K, L=L, T=T, gpu=gpu, outdir=outdir, opts=opts)
+                --workers 5  {opts} --head-depth -1 --gpu-id {gpu} && \
+            '''
+            #.format(model_str=model_str, model_name=model_name, K=K, L=L, T=T, gpu=gpu, outdir=outdir, opts=opts)
 
-    cmd += '''
+    cmd += f'''
          python davis/convert_davis.py --in_folder {outdir}/results_{model_name}/ --out_folder {outdir}/converted_{model_name}/ \
-            --dataset /data/ajabri/davis/DAVIS/ \
+            --dataset {datapath} \
                 \
-        && python /data/ajabri/davis-2017/python/tools/eval.py \
+        && python {davis2017path}/python/tools/eval.py \
             -i {outdir}/converted_{model_name}/ -o {outdir}/converted_{model_name}/results.yaml \
                 --year 2017 --phase val
-    '''.format(model_str=model_str, model_name=model_name, K=K, L=L, T=T, gpu=gpu, outdir=outdir)
+    '''#.format(model_str=model_str, model_name=model_name, K=K, L=L, T=T, gpu=gpu, outdir=outdir)
 
-    # print(cmd)
-    # return 
-
-    os.system(cmd)
+    os.system(f"PYTHONPATH={davis2017path}/python/lib/ " + cmd)
 
     outfile = f"{outdir}/converted_{model_name}/results.yaml"
 

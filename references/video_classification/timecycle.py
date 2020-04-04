@@ -398,7 +398,7 @@ class TimeCycle(nn.Module):
         t_pairs = list(itertools.combinations(range(T), 2))
         L = len(t_pairs)
 
-        if np.random.random() < 0.1 or visualize:
+        if np.random.random() < 0.05 or visualize:
             if ff.device.index == 0:
                 for i in range(B):
                     pg_win = 'patchgraph_%s'%i
@@ -415,11 +415,6 @@ class TimeCycle(nn.Module):
 
             for (t1, t2) in t_pairs:
                 f1, f2 = ff[:, :, t1], ff[:, :, t2]
-
-                # import pdb; pdb.set_trace()
-
-                # cv2.drawMatches(img1, kps, img2,kps,matches[:10],None, flags=2)
-
 
                 A, AA, log_AA, A12, A21 = self.compute_affinity(f1, f2)
                 log_AA = log_AA.view(-1, log_AA.shape[-1])
@@ -441,7 +436,7 @@ class TimeCycle(nn.Module):
                     AAs.append(AA)
 
                 # _AA = AA.view(-1, H * W, H, W)
-                if np.random.random() < 0.005 or visualize:
+                if np.random.random() < (0.01 / len(t_pairs)) or visualize:
                     self.viz.text('%s %s' % (t1, t2), opts=dict(height=1, width=10000), win='div')
                     self.visualize_frame_pair(x, ff, mm, t1, t2)
 
@@ -524,7 +519,7 @@ class TimeCycle(nn.Module):
                     diags['xent cyc %s' % str(i)] = xent_loss.mean().detach()
 
             
-        if _N > 1 and (np.random.random() < 0.001 or visualize):
+        if _N > 1 and (np.random.random() < (0.01 / len(t_pairs)) or visualize):
             # all patches
             all_x = x.permute(0, 3, 1, 2, 4, 5)
             all_x = all_x.reshape(-1, *all_x.shape[-3:])
@@ -533,6 +528,10 @@ class TimeCycle(nn.Module):
             all_A = torch.einsum('ij,kj->ik', all_f, all_f)
 
             utils.nn_patches(self.viz, all_x, all_A[None])
+
+        for k in diags:
+            diags["%s %s" % (H, k)] = diags[k]
+            del diags[k]
 
         return ff, self.xent_coef * sum(xents)/max(1, len(xents)-1), self.kldv_coef * sum(kldvs)/max(1, len(kldvs)-1), diags
 

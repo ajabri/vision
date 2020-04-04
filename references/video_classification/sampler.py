@@ -83,6 +83,9 @@ class UniformClipSampler(torch.utils.data.Sampler):
             s += length
             idxs.append(sampled)
         idxs = torch.cat(idxs).tolist()
+        
+        import pdb; pdb.set_trace()
+
         return iter(idxs)
 
     def __len__(self):

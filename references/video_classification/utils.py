@@ -780,13 +780,17 @@ def get_frame_aug(args):
     train_transform = transforms.Compose(train_transform)
 
     print('Frame augs:', train_transform, args.frame_aug)
+
+    # HACK if you up value the args field, it is a pointer!!!
+    patch_size = np.array(args.patch_size)
+
     def aug(x):
         if 'grid' in args.frame_aug:
             return patch_grid(x, transform=train_transform,
-                shape=args.patch_size, stride=args.pstride)
+                shape=patch_size, stride=args.pstride)
         elif 'randpatch' in args.frame_aug:
             return n_patches(x, args.npatch, transform=train_transform,
-                shape=args.patch_size, scale=args.npatch_scale)
+                shape=patch_size, scale=args.npatch_scale)
         else:
             return train_transform(x)
 
@@ -865,6 +869,29 @@ def get_frame_transform(args):
 
     return with_orig
 
+
+class AlternatingLoader:
+    def __init__(self, loaders):
+        self.loaders = [iter(l) for l in loaders]
+        self.cur = 0
+        
+    def __len__(self):
+        return len(self.loaders[0])
+
+    def __iter__(self):
+        return self 
+
+    def __next__(self):
+        out = next(self.loaders[self.cur])
+        self.cur = (self.cur + 1) % len(self.loaders)
+        # print(self.cur)
+        return out
+
+
+#################################################################################
+### Visualization Utils
+#################################################################################
+    
 # def vis_flow(u, v):
 #     flows = []
 #     u, v = u.data.cpu().numpy().astype(np.float32), v.data.cpu().numpy().astype(np.float32)
@@ -960,8 +987,46 @@ def draw_hsv(flow):
 
 
 
-
+#################################################################################
 ### Network Utils
+#################################################################################
+    
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+from torch.autograd import Variable
+
+class FocalLoss(nn.Module):
+    def __init__(self, gamma=0, alpha=None, size_average=True):
+        super(FocalLoss, self).__init__()
+        self.gamma = gamma
+        self.alpha = alpha
+        if isinstance(alpha,(float,int,long)): self.alpha = torch.Tensor([alpha,1-alpha])
+        if isinstance(alpha,list): self.alpha = torch.Tensor(alpha)
+        self.size_average = size_average
+
+    def forward(self, input, target):
+        if input.dim()>2:
+            input = input.view(input.size(0),input.size(1),-1)  # N,C,H,W => N,C,H*W
+            input = input.transpose(1,2)    # N,C,H*W => N,H*W,C
+            input = input.contiguous().view(-1,input.size(2))   # N,H*W,C => N*H*W,C
+        target = target.view(-1,1)
+
+        logpt = F.log_softmax(input)
+        logpt = logpt.gather(1,target)
+        logpt = logpt.view(-1)
+        pt = Variable(logpt.data.exp())
+
+        if self.alpha is not None:
+            if self.alpha.type()!=input.data.type():
+                self.alpha = self.alpha.type_as(input.data)
+            at = self.alpha.gather(0,target.data.view(-1))
+            logpt = logpt * Variable(at)
+
+        loss = -1 * (1-pt)**self.gamma * logpt
+        if self.size_average: return loss.mean()
+        else: return loss.sum()
+
 
 import cmc_resnet
 
