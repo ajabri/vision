@@ -32,14 +32,14 @@ def visualize(model, data_loader, device, vis=None):
         print('#### %s ####' % i)
 
         video = video.to(device)
-        # video -= video.min(); video /= video.max()
-        # [vis.vis.images(v, env='viz_kinetics') for v in video]
+        video -= video.min(); video /= video.max()
+        [vis.vis.images(v, env='viz_kinetics') for v in video]
 
-        # import pdb; pdb.set_trace()
-        output, xent_loss, kldv_loss, diagnostics = model(video, orig=orig, visualize=True)
-        loss = (xent_loss.mean() + kldv_loss.mean())
+        import pdb; pdb.set_trace()
+        # output, xent_loss, kldv_loss, diagnostics = model(video, orig=orig, visualize=True)
+        # loss = (xent_loss.mean() + kldv_loss.mean())
 
-        input('#### %s Done ####' % i)
+        # input('#### %s Done ####' % i)
         
         # if vis is not None and np.random.random() < 0.01:
         #     vis.log('xent_loss', xent_loss.mean().item())
@@ -127,7 +127,9 @@ def main(args):
 
     vis = utils.Visualize(args)
 
-    utils.init_distributed_mode(args)
+    #utils.init_distributed_mode(args)
+    args.distributed = False
+    
     print(args)
     print("torch version: ", torch.__version__)
     print("torchvision version: ", torchvision.__version__)
@@ -145,7 +147,7 @@ def main(args):
     st = time.time()
     cache_path = _get_cache_path(traindir)
     ######################
-    
+
     frame_transform_train = utils.get_frame_transform(args)
     transform_train = torchvision.transforms.Compose([
         frame_transform_train,
@@ -153,61 +155,68 @@ def main(args):
         # T.Resize((256, 256)),
     ])
 
-    def make_dataset(is_train):
-        _transform = transform_train if is_train else transform_test
+    def prep_dataset():
+        def make_dataset(is_train):
+            _transform = transform_train if is_train else transform_test
 
-        if 'kinetics' in args.data_path.lower():
-            return Kinetics400(
-                traindir if is_train else valdir,
-                frames_per_clip=args.clip_len,
-                step_between_clips=1,
-                transform=transform_train,
-                extensions=('mp4'),
-                frame_rate=args.frame_skip
-            )
-        elif os.path.isdir(args.data_path): # HACK assume image dataset if data path is a directory
-            return torchvision.datasets.ImageFolder(
-                root=args.data_path,
-                transform=_transform)
+            if 'kinetics' in args.data_path.lower():
+                return Kinetics400(
+                    traindir if is_train else valdir,
+                    frames_per_clip=args.clip_len,
+                    step_between_clips=1,
+                    transform=transform_train,
+                    extensions=('mp4'),
+                    frame_rate=args.frame_skip
+                )
+            elif os.path.isdir(args.data_path): # HACK assume image dataset if data path is a directory
+                return torchvision.datasets.ImageFolder(
+                    root=args.data_path,
+                    transform=_transform)
+            else:
+                return VideoList(
+                    filelist=args.data_path,
+                    clip_len=args.clip_len,
+                    is_train=is_train,
+                    frame_gap=args.frame_skip,
+                    transform=_transform,
+                    # frame_transform=_frame_transform
+                )
+
+        if args.cache_dataset and os.path.exists(cache_path):
+            print("Loading dataset_train from {}".format(cache_path))
+            dataset, _ = torch.load(cache_path)
+            dataset.transform = transform_train
         else:
-            return VideoList(
-                filelist=args.data_path,
-                clip_len=args.clip_len,
-                is_train=is_train,
-                frame_gap=args.frame_skip,
-                transform=_transform,
-                # frame_transform=_frame_transform
-            )
-
-    if args.cache_dataset and os.path.exists(cache_path):
-        print("Loading dataset_train from {}".format(cache_path))
-        dataset, _ = torch.load(cache_path)
-        dataset.transform = transform_train
-    else:
-        if args.distributed:
-            print("It is recommended to pre-compute the dataset cache "
-                  "on a single-gpu first, as it will be faster")
-        dataset = make_dataset(is_train=True)
+            if args.distributed:
+                print("It is recommended to pre-compute the dataset cache "
+                    "on a single-gpu first, as it will be faster")
+            dataset = make_dataset(is_train=True)
 
 
-        if args.cache_dataset and 'kinetics' in args.data_path.lower():
-            print("Saving dataset_train to {}".format(cache_path))
-            utils.mkdir(os.path.dirname(cache_path))
-            utils.save_on_master((dataset, traindir), cache_path)
-    
-    if hasattr(dataset, 'video_clips'):
-        dataset.video_clips.compute_clips(args.clip_len, 1, frame_rate=15)
+            if args.cache_dataset and 'kinetics' in args.data_path.lower():
+                print("Saving dataset_train to {}".format(cache_path))
+                utils.mkdir(os.path.dirname(cache_path))
+                utils.save_on_master((dataset, traindir), cache_path)
+        
+        if hasattr(dataset, 'video_clips'):
+            dataset.video_clips.compute_clips(args.clip_len, 1, frame_rate=4)
 
+        return dataset
+        
+    dataset = prep_dataset()
     print("Took", time.time() - st)
 
 
     def make_data_sampler(is_train, dataset):
+        torch.manual_seed(0)
         if hasattr(dataset, 'video_clips'):
             _sampler = RandomClipSampler if is_train else UniformClipSampler
+            # _sampler = UniformClipSampler
             return _sampler(dataset.video_clips, args.clips_per_video)
         else:
             return torch.utils.data.sampler.RandomSampler(dataset) if is_train else None
-            
+    
+        
     print("Creating data loaders")
     train_sampler = make_data_sampler(True, dataset)
     # train_sampler = train_sampler(dataset.video_clips, args.clips_per_video)
@@ -216,10 +225,23 @@ def main(args):
     if args.distributed:
         train_sampler = DistributedSampler(train_sampler)
 
-    data_loader = torch.utils.data.DataLoader(
+    # 64px
+    data_loader_64 = torch.utils.data.DataLoader(
         dataset, batch_size=args.batch_size,
-        sampler=train_sampler, num_workers=args.workers,
+        sampler=train_sampler, num_workers=args.workers//2,
         pin_memory=True, collate_fn=collate_fn)
+
+    # 128px
+    args.patch_size = (128, 128, 3)
+    dataset_2 = prep_dataset()
+    dataset_2.transform = utils.get_frame_transform(args)
+
+    data_loader_128 = torch.utils.data.DataLoader(
+        dataset_2, batch_size=args.batch_size,
+        sampler=train_sampler, num_workers=args.workers//2,
+        pin_memory=True, collate_fn=collate_fn)
+
+    data_loader = utils.AlternatingLoader([data_loader_64, data_loader_128])
 
     print("Creating model")
     import resnet3d as resnet
@@ -447,13 +469,17 @@ def parse_args():
 
     if args.output_dir == 'auto':
         args.dataset = 'kinetics' if 'kinetics' in args.data_path else 'pennaction'
-        keys = ['dataset', 'dropout', 'clip_len', 'frame_transforms', 'frame_aug', 'zero_diagonal', 'npatch', 'nrel', 'pstride', 'edgefunc', 'optim', 'temp', 'featdrop', 'lr']
-        name = '_'.join(["%s%s" % (k, getattr(args, k) if not isinstance(getattr(args, k), list) else '-'.join([str(s) for s in getattr(args, k)])) for k in keys])
+        keys = {
+            'dropout':'drop', 'clip_len': 'len', 'frame_transforms': 'ftrans', 'frame_aug':'faug', 'zero_diagonal':'zdiag', 
+            'pstride':'pstride', 'optim':'optim', 'temp':'temp',
+            'featdrop':'fdrop', 'lr':'lr', 'skip_coef':'skip', 'head_depth':'mlp'
+        }
+        name = '-'.join(["%s%s" % (keys[k], getattr(args, k) if not isinstance(getattr(args, k), list) else '-'.join([str(s) for s in getattr(args, k)])) for k in keys])
         args.output_dir = "checkpoints/%s_%s/" % (args.name, name)
 
         import datetime
         dt = datetime.datetime.today()
-        args.name = "%s-%s-timecycle_%s_%s" % (str(dt.month), str(dt.day), args.name, name)
+        args.name = "%s-%s--%s_%s" % (str(dt.month), str(dt.day), args.name, name)
 
     return args
 
