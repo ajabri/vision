@@ -41,8 +41,8 @@ def test(model, L=5, K=2, T=0.01, opts=[], gpu=0):
 
     outfile = f"{outdir}/converted_{model_name}/results.yaml"
 
-    if not os.path.isfile(outfile)
-
+    if not os.path.isfile(outfile):
+        print('Testing', model_name)
         if not os.path.isdir(f"{outdir}/results_{model_name}"):# or True:
             cmd += f'''
                 python test.py --filelist {datapath}/vallist.txt {model_str} \
@@ -73,7 +73,7 @@ def sweep(models, parallelize=True):
     T = [0.1]#, 0.05]
 
     # opts = [['--head-depth', str(-1)]] #['--radius', str(10)], ['--radius', str(5)], ['--radius', str(2.5)]] #, ['--all-nn']]
-    opts = [['--cropSize', str(540)]]
+    opts = [['--cropSize', str(540), '--head-depth', str(-1)]]
     prod = list(itertools.product(models, L, K, T, opts))
 
     if parallelize:
@@ -97,17 +97,15 @@ def sweep(models, parallelize=True):
             test(*prod[i], 0)
 
 
-def serve():
+def serve(checkpoint_dir):
     import time
-
-    checkpoint_dir = ''
 
     while True:
         time.sleep(10)
 
-        for f in os.path.listdir(checkpoint_dir):
+        for f in os.listdir(checkpoint_dir):
             model_path = "%s/%s" %(checkpoint_dir, f)
-
+            
             sweep(model_path, parallelize=False)
 
 
@@ -137,4 +135,19 @@ if __name__ == '__main__':
     #     # "checkpoints/test_no_shuff_datasetpennaction_dropout0.1_clip_len4_frame_transformscj+crop+blur_frame_auggrid_zero_diagonalFalse_npatch5_nrel10_pstride0.25-0.25_edgefuncsoftmax_optimsgd_temp0.08_featdrop0.0_lr0.0003/model_5.pth"
     #     "checkpoints/test_no_shuff_datasetpennaction_dropout0.1_clip_len3_frame_transformscj+crop+blur_frame_auggrid_zero_diagonalFalse_npatch5_nrel10_pstride0.5-0.5_edgefuncsoftmax_optimadam_temp0.08_featdrop0.0_lr0.0003/model_4.pth"
     # ]
-    sweep(models)
+
+    import argparse
+    parser = argparse.ArgumentParser()
+
+    parser.add_argument('--checkpoint-dir', default='./test_checkpoints/', type=str)
+    parser.add_argument('--model-path', default=[], type=str, nargs='+',)
+    
+    args = parser.parse_args()
+
+    if len(args.model_path) > 0:
+        sweep(args.model_path, parallelize=False)
+
+    # sweep(models)
+
+    else:
+        serve(args.checkpoint_dir)
