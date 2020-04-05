@@ -49,7 +49,7 @@ def visualize(model, data_loader, device, vis=None):
 
         
 def train_one_epoch(model, criterion, optimizer, lr_scheduler, data_loader, device, epoch, print_freq,
-    apex=False, vis=None, checkpoint_fn=None):
+    apex=False, max_steps=1e10, vis=None, checkpoint_fn=None):
 
     model.train()
     metric_logger = utils.MetricLogger(delimiter="  ")
@@ -57,11 +57,13 @@ def train_one_epoch(model, criterion, optimizer, lr_scheduler, data_loader, devi
     metric_logger.add_meter('clips/s', utils.SmoothedValue(window_size=10, fmt='{value:.3f}'))
 
     header = 'Epoch: [{}]'.format(epoch)
-    for video, orig in metric_logger.log_every(data_loader, print_freq, header):
+
+    for step, (video, orig) in enumerate(metric_logger.log_every(data_loader, print_freq, header)):
+        if step > max_steps:
+            break
+
         start_time = time.time()
 
-        import pdb; pdb.set_trace()
-        
         video = video.to(device)
         output, xent_loss, kldv_loss, diagnostics = model(video, orig=orig)
         loss = (xent_loss.mean() + kldv_loss.mean())
@@ -73,7 +75,7 @@ def train_one_epoch(model, criterion, optimizer, lr_scheduler, data_loader, devi
             for k,v in diagnostics.items():
                 vis.log(k, v.mean().item())
 
-        if checkpoint_fn is not None and np.random.random() < 0.5:
+        if checkpoint_fn is not None and np.random.random() < 0.005:
             checkpoint_fn()
 
  
@@ -340,7 +342,7 @@ def main(args):
         if args.distributed:
             train_sampler.set_epoch(epoch)
         train_one_epoch(model, criterion, optimizer, lr_scheduler, data_loader,
-                        device, epoch, args.print_freq, args.apex,
+                        device, epoch, args.print_freq, args.apex, max_steps=args.steps_per_epoch,
                         vis=vis, checkpoint_fn=save_model_checkpoint)
 
         # eval on davis
@@ -373,6 +375,7 @@ def parse_args():
     parser.add_argument('-b', '--batch-size', default=24, type=int)
     parser.add_argument('--epochs', default=45, type=int, metavar='N',
                         help='number of total epochs to run')
+    parser.add_argument('--steps-per-epoch', default=1e10, type=int, help='max number of batches per epoch')
     parser.add_argument('-j', '--workers', default=10, type=int, metavar='N',
                         help='number of data loading workers (default: 16)')
     parser.add_argument('--lr', default=3e-4, type=float, help='initial learning rate')

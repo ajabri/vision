@@ -35,7 +35,7 @@ def test(model, L=5, K=2, T=0.01, opts=[], gpu=0):
     opts = ' '.join(opts)
     cmd = ""
 
-    if not os.path.isdir(f"{outdir}/results_{model_name}"):# or True:
+    if not os.path.isdir(f"{outdir}/results_{model_name}") or True:
         cmd += f'''
             python test.py --filelist {datapath}/vallist.txt {model_str} \
                 --topk_vis {K}   --videoLen {L} --temperature {T} --save-path {outdir}/results_{model_name} \
@@ -67,7 +67,7 @@ def sweep(models):
     T = [0.1]#, 0.05]
 
     # opts = [['--head-depth', str(-1)]] #['--radius', str(10)], ['--radius', str(5)], ['--radius', str(2.5)]] #, ['--all-nn']]
-    opts = [['--cropSize', str(540)]]
+    opts = [['--cropSize', str(320), '--head-depth', str(-1)]]
     prod = list(itertools.product(models, L, K, T, opts))
 
     import multiprocessing
@@ -79,7 +79,7 @@ def sweep(models):
         for j in range(3):
             if i+j < len(prod):
                 print((*prod[i+j], j))
-                result = pool.apply_async(test, (*prod[i+j], j))
+                result = pool.apply_async(test, (*prod[i+j], 1))
                 results.append(result)
 
                 # test(*prod[i+j], j)
@@ -101,8 +101,10 @@ if __name__ == '__main__':
         # "checkpoints/vlog_datasetpennaction_dropout0.1_clip_len6_frame_transformscj+crop_frame_auggrid_zero_diagonalFalse_npatch5_nrel10_pstride0.5-0.5_edgefuncsoftmax_optimadam_temp0.08_featdrop0.1_lr0.0003/model_%s.pth" \
         # "checkpoints/vlog_datasetpennaction_dropout0.0_clip_len6_frame_transformscj+crop_frame_auggrid_zero_diagonalFalse_npatch5_nrel10_pstride0.5-0.5_edgefuncsoftmax_optimadam_temp0.08_featdrop0.5_lr0.0003/model_%s.pth"
         #     % i for i in [1, 4, 7, 10, 13, 16]
-        "checkpoints/vlog_datasetpennaction_dropout0.1_clip_len6_frame_transformscj+crop_frame_auggrid_zero_diagonalFalse_npatch5_nrel10_pstride0.5-0.5_edgefuncsoftmax_optimadam_temp0.08_featdrop0.1_lr0.0003/model_11.pth",
-        'imagenet', 'moco',    
+        # "checkpoints/vlog_datasetpennaction_dropout0.1_clip_len6_frame_transformscj+crop_frame_auggrid_zero_diagonalFalse_npatch5_nrel10_pstride0.5-0.5_edgefuncsoftmax_optimadam_temp0.08_featdrop0.1_lr0.0003/model_11.pth",
+        # "checkpoints/alt1_drop0.2-len6-ftranscj+crop+blur-fauggrid-zdiagFalse-pstride0.5-0.5-optimadam-temp0.08-fdrop0.1-lr0.0003-skip0.0-mlp0/checkpoint.pth"
+        "checkpoints/alt1_drop0.1-len6-ftranscj+crop+blur-fauggrid-zdiagFalse-pstride0.5-0.5-optimadam-temp0.08-fdrop0.1-lr0.0003-skip0.0-mlp0/model_0.pth"
+        # 'imagenet', 'moco',    
     ]
     # models = [
     #     "checkpoints/longcycle_reload_lr1e-4_datasetkinetics_dropout0.1_clip_len6_frame_transformscrop+cj_frame_auggrid_zero_diagonalFalse_npatch5_nrel10_pstride0.5-0.5_edgefuncsoftmax_optimadam_temp0.08_featdrop0.1_lr0.0001/model_2.pth"
