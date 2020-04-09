@@ -99,6 +99,7 @@ class TimeCycle(nn.Module):
             self.model_type = getattr(args, 'model_type', 'scratch')
             self.temperature = getattr(args, 'temp', 1)
             self.shuffle = getattr(args, 'shuffle', 0)
+            self.xent_weight = getattr(args, 'xent_weight', False)
         else:
             self.kldv_coef = 0
             self.xent_coef = 0
@@ -108,6 +109,8 @@ class TimeCycle(nn.Module):
             self.model_type = 'scratch'
             self.temperature = 1
             self.shuffle = False
+            self.xent_weight = False
+
         
         self.encoder = utils.make_encoder(self.model_type).cuda()
 
@@ -174,16 +177,16 @@ class TimeCycle(nn.Module):
             return Identity()
         if depth == 0:
             return nn.Linear(self.enc_hid_dim, 128)
-            
-        dims = [self.enc_hid_dim] + [self.enc_hid_dim] * depth + [128]
+        else:
+            dims = [self.enc_hid_dim] + [self.enc_hid_dim] * depth + [128]
 
-        for d1, d2 in zip(dims, dims[1:]):
-            # h = nn.Conv3d(d1, d2, kernel_size=1, bias=True)
-            # nn.init.kaiming_normal_(h.weight, mode='fan_out', nonlinearity='relu')
-            h = nn.Linear(d1, d2)
-            head += [h, nn.ReLU()]
+            for d1, d2 in zip(dims, dims[1:]):
+                # h = nn.Conv3d(d1, d2, kernel_size=1, bias=True)
+                # nn.init.kaiming_normal_(h.weight, mode='fan_out', nonlinearity='relu')
+                h = nn.Linear(d1, d2)
+                head += [h, nn.ReLU()]
 
-        head = head[:-1]
+        # head = head[:-1]
         head = nn.Sequential(*head)
         return head
 
@@ -225,12 +228,15 @@ class TimeCycle(nn.Module):
         # import pdb; pdb.set_trace()
         return A * mask
 
+    def dropout_mask(self, A):
+        return (torch.rand(A.shape) < self.dropout_rate).cuda()
+
     def compute_affinity(self, x1, x2, do_dropout=True, zero_diagonal=None):
         B, C, N = x1.shape
         H = int(N**0.5)
         # assert x1.shape == x2.shape
 
-        if do_dropout:
+        if do_dropout and self.featdrop_rate > 0:
             x1, x2 = self.featdrop(x1), self.featdrop(x2)
             x1, x2 = F.normalize(x1, dim=1), F.normalize(x2, dim=1)
 
@@ -239,7 +245,9 @@ class TimeCycle(nn.Module):
         t0 = time.time()
         
         # fast mm, pretty
+        # import pdb; pdb.set_trace()
         A = torch.einsum('bcn,bcm->bnm', x1, x2)
+
         # t1 = time.time()
 
         # # more flexible
@@ -257,7 +265,6 @@ class TimeCycle(nn.Module):
                             #    stride=1,
                             #    padding=0,
                             #    dilation_patch=1)
-
         # # cc = utils.Correlation(pad_size=0, kernel_size=1, max_displacement=H, stride1=1, stride2=1, corr_multiply=1)
         # # A_s = cc(x1.view(B, C, H, H).contiguous(), x2.view(B, C, H, H).contiguous())
 
@@ -268,35 +275,40 @@ class TimeCycle(nn.Module):
         if self.restrict is not None: #: and do_dropout:
             A = self.restrict(A)
 
+
+        return A #, AA, log_AA, A1, A2
+    
+    def stoch_mat(self, A, zero_diagonal=True, do_dropout=True):
+        '''
+            Affinity -> Stochastic Matrix
+        '''
+
         if (zero_diagonal is not False) and self.zero_diagonal:
             A = self.zeroout_diag(A)
 
-        # if self.a_topk:
-        #     A = sel
-        # A12 = A.view(A.size(0), 1, H * H, W, W)
-        # A21 = A.view(A.size(0), 1, H, H, W * W) 
-        # A12  = F.softmax(A, dim=2)
-        # A21  = F.softmax(A.transpose(1, 2), dim=2)
+        if do_dropout and self.dropout_rate > 0:
+            mask = self.dropout_mask(A)
+            # A = A.clone()
+            A[mask] = 1e-20
 
-        A1, A2 = A, A.transpose(1, 2)        
-        if do_dropout:
-            A1, A2 = self.dropout(A1), self.dropout(A2)
-    
         if self.edge == 'softmax':
-            A1, A2 = F.softmax(A1/self.temperature, dim=-1), F.softmax(A2/self.temperature, dim=-1)
+            # import pdb; pdb.set_trace()
+            A = F.softmax(A/self.temperature, dim=-1)
+            # A = F.normalize(A - A.min(-1)[0][..., None] + 1e-20, dim=-1, p=1)
         else:
             if not hasattr(self, 'graph_bias'):
                 self.graph_bias = nn.Parameter((torch.ones(*A.shape[-2:])) * 1e-2).to(next(self.encoder.parameters()).device)
+            A = F.normalize(F.relu(A + self.graph_bias)**2, dim=-1, p=1)
 
-            A1, A2 = F.normalize(F.relu(A1 + self.graph_bias)**2, dim=-1, p=1), F.normalize(F.relu(A2 + self.graph_bias.transpose(0,1))**2, dim=-1, p=1)
+        ## TODO TOP K
 
-        AA = torch.matmul(A2, A1)
-        log_AA = torch.log(AA + 1e-20)
-
-        return A, AA, log_AA, A1, A2
-    
+        return A
 
     def pixels_to_nodes(self, x):
+        '''
+            pixel map to list of node embeddings
+        '''
+
         # Encode into B x C x T x N
         B, N, C, T, h, w = x.shape
         x = x.reshape(B*N, C, T, h, w) 
@@ -321,6 +333,7 @@ class TimeCycle(nn.Module):
         # import pdb; pdb.set_trace()
 
         # produce node vector representations by spatially pooling feature maps
+        # mm = F.normalize(mm, dim=1)
         ff = mm.sum(-1).sum(-1) / (H*W)
         # ff = torch.einsum('ijklm->ijk', ff) / ff.shape[-1]*ff.shape[-2] 
 
@@ -333,6 +346,19 @@ class TimeCycle(nn.Module):
 
         return ff, mm
 
+    def loss_mask(self, A, P):
+        '''
+            P is row-normalized, process stochastic matrix of affinity A
+        '''
+        entropy = (-P * torch.log(P)).sum(-1) / np.log(P.shape[-1])
+        # maxsim = A.max(-1)[0]
+        maxsim = A.topk(k=2, dim=-1)[0][..., -1]
+        xent_weight = 1 / (maxsim * entropy)
+
+        xent_weight = torch.clamp(xent_weight, min=0, max=5)
+        return xent_weight
+
+        # import pdb; pdb.set_trace()
 
     def forward(self, x, orig=None, just_feats=False, visualize=False):
         # x = x.cpu() * 0 + torch.randn(x.shape)
@@ -396,6 +422,9 @@ class TimeCycle(nn.Module):
 
         # produce A between all pairs of frames, store A for adjacent frames
         t_pairs = list(itertools.combinations(range(T), 2))
+        if not self.garg('skip_coef', 0) > 0:
+            t_pairs = [(t1, t2) for (t1, t2) in t_pairs if (t2-t1) == 1]
+        
         L = len(t_pairs)
 
         if np.random.random() < 0.05 or visualize:
@@ -406,20 +435,22 @@ class TimeCycle(nn.Module):
                     if not self.viz.win_exists(pg_win, env=self.viz.env+'_pg') or visualize:
                         tviz = 0
                         self.viz.clear_event_handlers(pg_win)
-                        A, AA, log_AA, A12, A21 = self.compute_affinity(ff[i:i+1, :, tviz], ff[i:i+1, :, tviz+1], do_dropout=False)
+                        A = self.compute_affinity(ff[i:i+1, :, tviz], ff[i:i+1, :, tviz+1], do_dropout=False)
                         pg = utils.PatchGraph(self.viz,
                             x[i, :, :, tviz:tviz+2].transpose(1, 2),
                             A[0], win=pg_win, orig=orig)
 
         if len(t_pairs) > 0:
-
             for (t1, t2) in t_pairs:
                 f1, f2 = ff[:, :, t1], ff[:, :, t2]
 
-                A, AA, log_AA, A12, A21 = self.compute_affinity(f1, f2)
-                log_AA = log_AA.view(-1, log_AA.shape[-1])
+                A = self.compute_affinity(f1, f2)
+                A1, A2 = self.stoch_mat(A), self.stoch_mat(A.transpose(-1, -2))
+                AA = A1 @ A2
 
                 if self.garg('skip_coef', 0) > 0:
+                    log_AA = torch.log(AA + 1e-20).view(-1, AA.shape[-1])
+                    
                     xent_loss, acc = self.compute_xent_loss(A, log_AA)
                     kldv_loss = self.compute_kldv_loss(A, log_AA)
 
@@ -429,88 +460,41 @@ class TimeCycle(nn.Module):
                     kldvs.append(kldv_loss)
                     diags['skip_accur'] += acc
                 
-                As.append(A12)
-                if (t2 - t1) == 1:
-                    A12s.append(A12)
-                    A21s.append(A21)
+                if t2 - t1 == 1:
+                    As.append(A)
+                    A12s.append(A1)
+                    A21s.append(A2)
                     AAs.append(AA)
 
-                # _AA = AA.view(-1, H * W, H, W)
-                if np.random.random() < (0.01 / len(t_pairs)) or visualize:
+                if np.random.random() < (0.05 / len(t_pairs)) or visualize:
                     self.viz.text('%s %s' % (t1, t2), opts=dict(height=1, width=10000), win='div')
                     self.visualize_frame_pair(x, ff, mm, t1, t2)
-
-
-            #########################################################
-            # Affinity contrastive
-            #########################################################
-
-            if self.garg('cal_coef', 0) > 0:
-                if not hasattr(self, 'aff_encoder'):
-                    # downsample = nn.Conv3d(N, N//2,
-                    #         kernel_size=1, stride=2, bias=False),
-                    #     nn.BatchNorm2d(N//2)
-                    # )
-                    # self.aff_encoder = resnet2d.Bottleneck(A.shape[-1], 128, downsample=downsample)
-                    aff_C = A.shape[-1]
-                    self.aff_encoder = utils.make_aff_encoder(aff_C, self.enc_hid_dim).to(x.device)
-
-                _As = torch.cat(As, dim=0)
-                _As = _As.view(*_As.shape[:-1], int(N**0.5), int(N**0.5))
-                a_con = self.aff_encoder(_As)
-                a_con = a_con.sum(-1).sum(-1) / (a_con.shape[-1]*a_con.shape[-2])
-
-                # _mm = mm.squeeze(-1).squeeze(-1).permute(0, 2, 3, 1)
-                # _mm = mm.squeeze(-1).squeeze(-1).permute(0, 2, 3, 1) 
-                # _mm = _mm.view(*_mm.shape[:-1], int(N**0.5), int(N**0.5))
-
-                _ff = ff.view(*ff.shape[:-1], int(N**0.5), int(N**0.5))
-                idxs = torch.Tensor(t_pairs).long()
-                _ff = _ff[:, :, idxs].transpose(1, 2).flatten(0,1)
-
-                a_hat = self.stack_encoder(_ff).squeeze(-3)
-                a_hat = a_hat.sum(-1).sum(-1) / (a_hat.shape[-1]*a_hat.shape[-2])
-
-                a_hat, a_con = F.normalize(a_hat, dim=-1), F.normalize(a_con, dim=-1)
-
-                a_pred = torch.einsum('jk,lk->jl', a_hat, a_con) / self.temperature
-                a_targ = torch.arange(0, a_pred.shape[-1]).to(a_pred.device)
-                a_loss = self.xent(a_pred, a_targ).mean()
-                xents.append(a_loss)
-                diags['xent cont aff'] = a_loss.detach()
-
-
-                # a_hat = a_hat.view(B, -1, *a_hat.shape[1:])
-                # a_con = a_con.view(B, -1, *a_con.shape[1:])
-
-                # for i, (t1, t2) in enumerate(t_pairs):
-                #     _mm = mm.squeeze(-1).squeeze(-1).permute(0, 2, 3, 1)
-                #     _mm = _mm.view(*_mm.shape[:-1], int(N**0.5), int(N**0.5))
-
-                #     m1, m2 = _mm[:, :, t1], _mm[:, :, t2]
-                #     ms = torch.stack([m1,m2], dim=2)
-
-                    # a_hat = self.stack_encoder(ms)[..., 0, :, :]
-                    # a_hat = a_hat.sum(-1).sum(-1) / (a_hat.shape[-1]*a_hat.shape[-2])
-
-                # import pdb; pdb.set_trace()
-
-            #########################################################
 
 
             # longer cycle:
             if self.garg('long_coef', 0) > 0:
                 a12, a21 = A12s[0], A21s[0]
+                # a12, a21 = torch.eye(A12s[0].shape[-2])[None].cuda(), torch.eye(A21s[0].shape[-1])[None].cuda()
+
                 for i in range(1, len(A12s)):
-                    a12, a21 = torch.matmul(A12s[i], a12), torch.matmul(a21, A21s[i])
-                    aa = torch.matmul(a21, a12)
+                    # a12 = a12 @ A12s[i]
+                    # a21 = A21s[i] @ a21
+                    # aa = a12 @ a21
+
+                    a12 = A12s[i] @ a12
+                    a21 = a21 @ A21s[i]
+                    aa = a21 @ a12
+
                     log_aa = torch.log(aa + 1e-20).view(-1, aa.shape[-1])
 
-                    xent_loss, acc = self.compute_xent_loss(aa, log_aa)
-                    kldv_loss = self.compute_kldv_loss(aa, log_aa)
+                    xent_weight = None
+                    if self.garg('xent_weight', False):
+                        xent_weight = self.loss_mask(As[i], aa).detach()
+                        # print(xent_weight.min(), xent_weight.max())
+                        # import pdb; pdb.set_trace()
 
-                    # xents += xent_loss
-                    # kldvs += kldv_loss
+                    xent_loss, acc = self.compute_xent_loss(aa, log_aa, weight=xent_weight)
+                    kldv_loss = self.compute_kldv_loss(aa, log_aa)
 
                     xents.append(xent_loss)
                     kldvs.append(kldv_loss)
@@ -530,6 +514,7 @@ class TimeCycle(nn.Module):
             utils.nn_patches(self.viz, all_x, all_A[None])
 
         for k in diags:
+            # import pdb; pdb.set_trace()
             diags["%s %s" % (H, k)] = diags[k]
             del diags[k]
 
@@ -560,11 +545,15 @@ class TimeCycle(nn.Module):
 
         return self._xent_targets[key]
 
-    def compute_xent_loss(self, A, log_AA):
+    def compute_xent_loss(self, A, log_AA, weight=None):
         # Cross Entropy
         targets = self.xent_targets(A)
+
         if self.xent_coef > 0:
             _xent_loss = self.xent(log_AA, targets)
+
+            if weight is not None:
+                _xent_loss = _xent_loss * weight.flatten()
 
             return _xent_loss.mean().unsqueeze(-1), \
                 (torch.argmax(log_AA, dim=-1) == targets).float().mean().unsqueeze(-1)
@@ -582,18 +571,46 @@ class TimeCycle(nn.Module):
             return 0
 
     def visualize_frame_pair(self, x, ff, mm, t1, t2):
+        normalize = lambda x: (x-x.min()) / (x-x.min()).max()
+
         # B, C, T, N = ff.shape
         f1, f2 = ff[:, :, t1], ff[:, :, t2]
 
-        A, AA, log_AA, A1, A2 = self.compute_affinity(f1, f2, do_dropout=False, zero_diagonal=False)
+        A = self.compute_affinity(f1, f2)
+        A1  = self.stoch_mat(A, False, False)
+        A2 = self.stoch_mat(A.transpose(-1, -2), False, False)
+        AA = A1 @ A2
+        log_AA = torch.log(AA + 1e-20)
+
         log_AA = log_AA.view(-1, log_AA.shape[1])
         _xent_loss = self.xent(log_AA, self.xent_targets(A))
-        
+
         N = A.shape[-1]
         H = W = int(N**0.5)
         _AA = AA.view(-1, H * W, H, W)
 
-        # # FLOW
+        ##############################################
+        ## LOSS MASK VISUALIZATION
+        ##############################################
+        
+        def mask_to_img(m):
+            return cv2.resize(m.view(H, W).detach().cpu().numpy(), (280,280))
+
+        xent_weight = self.loss_mask(A, AA).detach()        
+        xent_weight_img = mask_to_img(xent_weight[0] / 5.0)
+
+        entropy = (-AA * torch.log(AA)).sum(-1) / np.log(AA.shape[-1])
+        entropy_img = mask_to_img(entropy[0])
+
+        maxsim = A.topk(k=2, dim=-1)[0][..., -1][0]
+        maxsim_img = mask_to_img(maxsim)
+
+        self.viz.images(np.stack([xent_weight_img, entropy_img, maxsim_img])[:, None], nrow=3, win='loss_mask_viz')
+
+        ##############################################
+        ## FLOW
+        ##############################################
+
         # _A = A.view(*A.shape[:2], f1.shape[-1], -1)
         # u, v = utils.compute_flow(_A[0:1])
         # flows = torch.stack([u, v], dim=-1).cpu().numpy()
@@ -611,8 +628,10 @@ class TimeCycle(nn.Module):
             # IMG VIZ
             # X here is B x C x T x H x W
             x1, x2 = x[0, :, t1].clone(), x[0, :, t2].clone()
-            x1 -= x1.min(); x1 /= x1.max()
-            x2 -= x2.min(); x2 /= x2.max()
+            # x1 -= x1.min(); x1 /= x1.max()
+            # x2 -= x2.min(); x2 /= x2.max()
+
+            x1, x2 = normalize(x1), normalize(x2)
 
             xx = torch.stack([x1, x2]).detach().cpu()
             self.viz.images(xx, win='imgs')
@@ -636,16 +655,19 @@ class TimeCycle(nn.Module):
 
             pca_feats = utils.pca_feats(torch.cat([m1, m2]).detach().cpu())
             pca_feats = utils.make_gif(pca_feats, outname=None, sz=64).transpose(0, -1, 1, 2)
-            self.viz.images(pca_feats[:N], nrow=int(N**0.5), win='pca_viz1')
-            self.viz.images(pca_feats[N:], nrow=int(N**0.5), win='pca_viz2')
             
-            for i, xx in enumerate([x1, x2]):
-                self.viz.images((xx-xx.min()) / ((xx-xx.min()).max()), nrow=int(N**0.5), win='pca_viz_imgs_%s' % str(i))
-
+            pca1 = torchvision.utils.make_grid(torch.Tensor(pca_feats[:N]), nrow=int(N**0.5), padding=1, pad_value=1)
+            pca2 = torchvision.utils.make_grid(torch.Tensor(pca_feats[N:]), nrow=int(N**0.5), padding=1, pad_value=1)
+            img1 = torchvision.utils.make_grid(normalize(x1)*255, nrow=int(N**0.5), padding=1, pad_value=1)
+            img2 = torchvision.utils.make_grid(normalize(x2)*255, nrow=int(N**0.5), padding=1, pad_value=1)
+            self.viz.images(torch.stack([pca1,pca2]), nrow=4, win='pca_viz_combined1')
+            self.viz.images(torch.stack([img1.cpu(),img2.cpu()]), nrow=4, win='pca_viz_combined2')
+        
+        ##############################################
         # LOSS VIS
-        xx = _xent_loss[:H*W]
-        xx -= xx.min()
-        xx /= xx.max()
+        ##############################################
+        
+        xx = normalize(_xent_loss[:H*W])
         img_grid = [cv2.resize(aa, (50,50), interpolation=cv2.INTER_NEAREST)[None] for aa in _AA[0, :, :, :, None].cpu().detach().numpy()]
         img_grid = [img_grid[_].repeat(3, 0) * np.array(color(xx[_].item()))[:3, None, None] for _ in range(H*W)]
         img_grid = [img_grid[_] / img_grid[_].max() for _ in range(H*W)]

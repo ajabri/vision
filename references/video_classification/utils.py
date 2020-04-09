@@ -27,6 +27,15 @@ def info(type, value, tb):
 sys.excepthook = info
 
 
+#########################################################
+# Misc
+#########################################################
+
+
+#########################################################
+# Meters
+#########################################################
+
 class SmoothedValue(object):
     """Track a series of values and provide access to smoothed values over a
     window or the global series average.
@@ -450,7 +459,7 @@ def draw_matches(x1, x2, i1, i2):
         matches = sorted(matches, key = lambda x:x.distance)
 
         # img1 = img2 = np.zeros((40, 40, 3))
-        out = cv2.drawMatches(i1, kps, i2,kps,matches[:], None, flags=2).transpose(2,0,1)
+        out = cv2.drawMatches(i1.astype(np.uint8), kps, i2.astype(np.uint8), kps,matches[:], None, flags=2).transpose(2,0,1)
 
     return out
 
@@ -633,7 +642,7 @@ class PatchGraph(object):
 
 class Visualize(object):
     def __init__(self, args, suffix='metrics', log_interval=2*60):
-        self._env_name = "%s_%s" % (args.name, suffix)
+        self._env_name = "%s-%s" % (args.name, suffix)
         self.vis = visdom.Visdom(
             port=args.port,
             server='http://%s' % args.server,
@@ -892,6 +901,58 @@ class AlternatingLoader:
 ### Visualization Utils
 #################################################################################
     
+
+def nn_pca(f, X, name='', vis=None):    
+    from sklearn.decomposition import PCA, FastICA
+    import visdom
+    import torchvision
+
+    if vis is None:
+        vis = visdom.Visdom(port=8095, env='%s-nn' % name)
+        vis.close()
+
+    # ########################### PCA ###########################
+    K = 50
+    # # pca = PCA(n_components=K, svd_solver='auto', whiten=False)
+    # pca = FastICA(n_components=K, whiten=False)
+
+    # # import pdb; pdb.set_trace()
+
+    # p_f = pca.fit_transform(f.numpy())
+
+    # l = []
+    # import math
+    # step = math.ceil(p_f.shape[0]/300)
+    # i_f = np.argsort(p_f, axis=0)[::step]
+
+    # for k in range(0, K):
+    #     vis.image(torchvision.utils.make_grid(X[i_f[:, k]], nrow=10, padding=2, pad_value=0).cpu().numpy(),
+    #         opts=dict(title='Component %s' % k))
+
+    # f = torch.cat(f1+f2, dim=0)
+    # X = torch.cat(X1+X2, dim=0)
+
+    D = torch.matmul(f,  f.t())
+    X -= X.min(); X /= X.max()
+
+    # f1 = torch.cat(f1, dim=0)
+    # f2 = torch.cat(f2, dim=0)
+
+    # vis.text('NN', opts=dict(width=1000, h=1))
+
+
+    # import pdb; pdb.set_trace()
+
+    ########################### NN  ###########################
+    V, I = torch.topk(D, 50, dim=-1)
+
+    for _k in range(K):
+        k = np.random.randint(X.shape[0])
+        vis.image(torchvision.utils.make_grid(X[I[k]], nrow=10, padding=2, pad_value=0).cpu().numpy(),
+            opts=dict(title='Example %s' % k))
+
+
+
 # def vis_flow(u, v):
 #     flows = []
 #     u, v = u.data.cpu().numpy().astype(np.float32), v.data.cpu().numpy().astype(np.float32)
@@ -1065,6 +1126,7 @@ def make_encoder(model_type='scratch'):
         # resnet = resnet2d.resnet34(pretrained=False,)        
 
         resnet = resnet2d.resnet18(pretrained=False)#, norm_layer=norm_layer)
+        # resnet.maxpool = None
 
     elif model_type == 'aaresnet':
         resnet = aa_resnet.resnet18(pretrained=False)

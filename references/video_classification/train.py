@@ -27,15 +27,27 @@ except ImportError:
 def visualize(model, data_loader, device, vis=None):
 
     header = 'Visualizing'
+    f1 = []
+    X1 = []
     for i, (video, orig) in enumerate(data_loader):
         start_time = time.time()
         print('#### %s ####' % i)
 
         video = video.to(device)
-        video -= video.min(); video /= video.max()
-        [vis.vis.images(v, env='viz_kinetics') for v in video]
+        # video -= video.min(); video /= video.max()
+        # [vis.vis.images(v, env='viz_kinetics') for v in video]
 
-        import pdb; pdb.set_trace()
+        f, m = model(video, orig=orig, just_feats=True)
+
+        feats = torch.nn.functional.normalize(m.sum(-1).sum(-1).transpose(-1, -2).contiguous().view(-1, m.shape[1]), dim=-1, p=2).detach().cpu()
+        f1.append(feats)
+        X1.append(video.view(-1, *video.shape[2:]).detach().cpu())
+        
+        if len(f1) > 50:
+            break
+
+        # import pdb; pdb.set_trace()
+
         # output, xent_loss, kldv_loss, diagnostics = model(video, orig=orig, visualize=True)
         # loss = (xent_loss.mean() + kldv_loss.mean())
 
@@ -47,6 +59,8 @@ def visualize(model, data_loader, device, vis=None):
         #     for k,v in diagnostics.items():
         #         vis.log(k, v.mean().item())
 
+    utils.nn_pca(torch.cat(f1), torch.cat(X1), name='timecycle-nn')
+    import pdb; pdb.set_trace()
         
 def train_one_epoch(model, criterion, optimizer, lr_scheduler, data_loader, device, epoch, print_freq,
     apex=False, vis=None, checkpoint_fn=None):
@@ -59,8 +73,6 @@ def train_one_epoch(model, criterion, optimizer, lr_scheduler, data_loader, devi
     header = 'Epoch: [{}]'.format(epoch)
     for video, orig in metric_logger.log_every(data_loader, print_freq, header):
         start_time = time.time()
-
-        import pdb; pdb.set_trace()
         
         video = video.to(device)
         output, xent_loss, kldv_loss, diagnostics = model(video, orig=orig)
@@ -73,9 +85,8 @@ def train_one_epoch(model, criterion, optimizer, lr_scheduler, data_loader, devi
             for k,v in diagnostics.items():
                 vis.log(k, v.mean().item())
 
-        if checkpoint_fn is not None and np.random.random() < 0.5:
+        if checkpoint_fn is not None and np.random.random() < 0.005:
             checkpoint_fn()
-
  
         # output, xent_loss, kldv_loss = model(video)
         # loss = (kldv_loss.mean() + xent_loss.mean()) #+ kldv_loss
@@ -201,10 +212,11 @@ def main(args):
             if args.cache_dataset and 'kinetics' in args.data_path.lower():
                 print("Saving dataset_train to {}".format(cache_path))
                 utils.mkdir(os.path.dirname(cache_path))
+                dataset.transform = None
                 utils.save_on_master((dataset, traindir), cache_path)
         
         if hasattr(dataset, 'video_clips'):
-            dataset.video_clips.compute_clips(args.clip_len, 1, frame_rate=4)
+            dataset.video_clips.compute_clips(args.clip_len, 1, frame_rate=8)
 
         return dataset
         
@@ -237,17 +249,18 @@ def main(args):
         pin_memory=True, collate_fn=collate_fn)
 
     # 128px
-    args.patch_size = (128, 128, 3)
-    dataset_2 = prep_dataset()
-    dataset_2.transform = utils.get_frame_transform(args)
+    # args.patch_size = (128, 128, 3)
+    # dataset_2 = prep_dataset()
+    # dataset_2.transform = utils.get_frame_transform(args)
 
-    data_loader_128 = torch.utils.data.DataLoader(
-        dataset_2, batch_size=args.batch_size,
-        sampler=train_sampler, num_workers=args.workers//2,
-        pin_memory=True, collate_fn=collate_fn)
+    # data_loader_128 = torch.utils.data.DataLoader(
+    #     dataset_2, batch_size=args.batch_size,
+    #     sampler=train_sampler, num_workers=args.workers//2,
+    #     pin_memory=True, collate_fn=collate_fn)
 
-    data_loader = utils.AlternatingLoader([data_loader_64, data_loader_128])
-
+    # # data_loader = utils.AlternatingLoader([data_loader_64, data_loader_128])
+    data_loader = data_loader_64
+    
     print("Creating model")
     import resnet3d as resnet
     import timecycle as tc
@@ -344,10 +357,10 @@ def main(args):
                         vis=vis, checkpoint_fn=save_model_checkpoint)
 
         # eval on davis
-        from run_test import test as davis_test
-        scores = davis_test(os.path.join(args.output_dir, 'model_{}.pth'.format(epoch)), gpu=1)
-        vis.log('Davis J mean', scores['J']['mean'])                    
-        vis.log('Davis F mean', scores['F']['mean'])
+        # from run_test import test as davis_test
+        # scores = davis_test(os.path.join(args.output_dir, 'model_{}.pth'.format(epoch)), gpu=1)
+        # vis.log('Davis J mean', scores['J']['mean'])                    
+        # vis.log('Davis F mean', scores['F']['mean'])
 
         # evaluate(model, criterion, data_loader_test, device=device)
 
@@ -471,6 +484,9 @@ def parse_args():
 
     parser.add_argument('--shuffle', default=0.0,
         type=float, help='shuffle patches across instances for different negatives')
+
+    parser.add_argument('--xent-weight', default=False, action='store_true',
+        help='use out-going entropy * max similarity as a loss gate')
 
     args = parser.parse_args()
 

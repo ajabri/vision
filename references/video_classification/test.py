@@ -172,6 +172,7 @@ def main():
             
 
 def softmax_base(A):
+
     if not args.all_nn:
         N, T, H, W, H, W = A.shape
         A = A.view(N, T, H*W, H, W)
@@ -219,8 +220,9 @@ def test(val_loader, model, epoch, use_cuda):
             q_dim = 0 if args.all_nn else 1
             weights, ids = torch.topk(A_t, topk_vis, dim=q_dim)
 
+            # import pdb; pdb.set_trace()
             # weights = torch.nn.functional.softmax(weights, dim=1)
-            # weights = torch.nn.functional.normalize(weights, dim=q_dim, p=1)
+            weights = torch.nn.functional.normalize(weights, dim=q_dim, p=1)
 
             t06 = time.time()
             # A_t = A_t.view(T, H, W, H, W)
@@ -377,20 +379,18 @@ def test(val_loader, model, epoch, use_cuda):
         # import pdb; pdb.set_trace()
 
         As = []
-        bsize = 5
+        bsize = 3
         for b in range(0, keys.shape[2], bsize):
-
-            A = torch.einsum('ijklmn,ijkop->iklmnop', keys[:, :, b:b+bsize].cuda(), query[:, :, b:b+bsize].cuda())
+            A = torch.einsum('ijklmn,ijkop->iklmnop', keys[:, :, b:b+bsize].cuda(), query[:, :, b:b+bsize].cuda()) / args.temperature
             A[0, :, 1:] *= D
             A = softmax_base(A[0])[None]
             # As.append(A)
             As.append(A.cpu())
 
-        A = torch.cat(As, dim=1) / args.temperature
+        A = torch.cat(As, dim=1) 
         t04 = time.time()
         print(t04-t03, 'model forward')
 
-        # import pdb; pdb.set_trace()
 
         if isinstance(lbl_set, list):
             lbl_set = torch.cat(lbl_set)[None]
