@@ -1211,64 +1211,51 @@ def _initialize_weights(model):
     return model
 
 
-import torch
-from torch.nn.modules.module import Module
-from torch.autograd import Function
-# import correlation_cuda
-
-class CorrelationFunction(Function):
-
-    def __init__(self, pad_size=3, kernel_size=3, max_displacement=20, stride1=1, stride2=2, corr_multiply=1):
-        super(CorrelationFunction, self).__init__()
-        self.pad_size = pad_size
-        self.kernel_size = kernel_size
-        self.max_displacement = max_displacement
-        self.stride1 = stride1
-        self.stride2 = stride2
-        self.corr_multiply = corr_multiply
-        # self.out_channel = ((max_displacement/stride2)*2 + 1) * ((max_displacement/stride2)*2 + 1)
-
-    def forward(self, input1, input2):
-        self.save_for_backward(input1, input2)
-
-        with torch.cuda.device_of(input1):
-            rbot1 = input1.new()
-            rbot2 = input2.new()
-            output = input1.new()
-
-            correlation_cuda.forward(input1, input2, rbot1, rbot2, output, 
-                self.pad_size, self.kernel_size, self.max_displacement,self.stride1, self.stride2, self.corr_multiply)
-
-        return output
-
-    def backward(self, grad_output):
-        input1, input2 = self.saved_tensors
-
-        with torch.cuda.device_of(input1):
-            rbot1 = input1.new()
-            rbot2 = input2.new()
-
-            grad_input1 = input1.new()
-            grad_input2 = input2.new()
-
-            correlation_cuda.backward(input1, input2, rbot1, rbot2, grad_output, grad_input1, grad_input2,
-                self.pad_size, self.kernel_size, self.max_displacement,self.stride1, self.stride2, self.corr_multiply)
-
-        return grad_input1, grad_input2
 
 
-class Correlation(Module):
-    def __init__(self, pad_size=0, kernel_size=0, max_displacement=0, stride1=1, stride2=2, corr_multiply=1):
-        super(Correlation, self).__init__()
-        self.pad_size = pad_size
-        self.kernel_size = kernel_size
-        self.max_displacement = max_displacement
-        self.stride1 = stride1
-        self.stride2 = stride2
-        self.corr_multiply = corr_multiply
+from spatial_correlation_sampler import SpatialCorrelationSampler
 
-    def forward(self, input1, input2):
+class Patchifier(nn.Module):
+    def __init__
+class Colorizer(nn.Module):
+    def __init__(self, D, R, C=16):
+        super(Colorizer, self).__init__()
+        self.D = 4
+        self.R = 6  # window size
+        self.C = 16
+        self.P = self.R * 2 + 1
 
-        result = CorrelationFunction(self.pad_size, self.kernel_size, self.max_displacement,self.stride1, self.stride2, self.corr_multiply)(input1, input2)
+        self.correlation_sampler = SpatialCorrelationSampler(
+            kernel_size=1,
+            patch_size=self.P,
+            stride=1,
+            padding=0,
+            dilation=1)
 
-        return result
+    def prep(self, image):
+        _,c,_,_ = image.size()
+        x = F.interpolate(image.float(), scale_factor=(1/self.D), mode='bilinear')
+        if c == 1:
+            x = one_hot(x.long(), self.C)
+        return x
+
+    def forward(self, feats_r, feats_t, quantized_r):
+        b,c,h,w = quantized_r.size()
+
+        r = self.prep(quantized_r)
+        r = F.pad(r, (self.R,self.R,self.R,self.R), mode='replicate')
+
+        corr = self.correlation_sampler(feats_t, feats_r)
+        _,_,_,h1,w1 = corr.size()
+
+        corr[corr == 0] = -1e10  # discount padding at edge for softmax
+        corr = corr.reshape([b, self.P*self.P, h1*w1])
+        corr = F.softmax(corr, dim=1)
+        corr = corr.unsqueeze(1)
+
+        image_uf = F.unfold(r, kernel_size=self.P)
+        image_uf = image_uf.reshape([b,self.C,self.P*self.P,h1*w1])
+
+        out = (corr * image_uf).sum(2).reshape([b,self.C,h1,w1])
+
+        return out

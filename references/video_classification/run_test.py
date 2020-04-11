@@ -47,7 +47,7 @@ def test(model, L=5, K=2, T=0.01, opts=[], gpu=0, force=False):
         print('Testing', model_name)
         if (not os.path.isdir(f"{outdir}/results_{model_name}")) or force:# or True:
             cmd += f'''
-                python test.py --filelist {datapath}/vallist.txt {model_str} \
+                python test_mem.py --filelist {datapath}/vallist.txt {model_str} \
                     --topk_vis {K}   --videoLen {L} --temperature {T} --save-path {outdir}/results_{model_name} \
                     --workers 5  {opts} --head-depth -1 --gpu-id {gpu} && \
                 '''
@@ -71,7 +71,10 @@ def sweep(models, L, K, T, size, multiprocess=False, slurm=False, force=False):
     import itertools
 
     # opts = [['--head-depth', str(-1)]] #['--radius', str(10)], ['--radius', str(5)], ['--radius', str(2.5)]] #, ['--all-nn']]
-    opts = [['--cropSize', str(size), '--head-depth', str(-1), '--all-nn']]
+    base_opts = ['--cropSize', str(size), '--head-depth', str(0), '--all-nn']
+
+    # opts = [base_opts + ['--radius', str(10)], base_opts + ['--radius', str(40)], base_opts + ['--radius', str(5)]]
+    opts = [base_opts + ['--radius', str(10)]] #, base_opts + ['--radius', str(5)]]
 
     prod = list(itertools.product(models, L, K, T, opts))
 

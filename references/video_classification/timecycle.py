@@ -46,39 +46,6 @@ class FoldTime(nn.Module):
     def forward(self, x):
         return x.view(x.shape[0] * x.shape[1], *x.shape[2:])
 
-class RestrictAttention(nn.Module):
-    def __init__(self, radius, flat=True):
-        super(RestrictAttention, self).__init__()
-        self.radius = radius
-        self.flat = flat
-        self.masks = {}
-        self.masks['10-10'] = self.make(10, 10)
-
-    def make(self, H, W):
-        if self.flat:
-            H = int(H**0.5)
-            W = int(W**0.5)
-        
-        gx, gy = torch.meshgrid(torch.arange(0, H), torch.arange(0, W))
-        D = ( (gx[None, None, :, :] - gx[:, :, None, None])**2 + (gy[None, None, :, :] - gy[:, :, None, None])**2 ).float() ** 0.5
-        D = (D < self.radius)[None].float()
-
-        if self.flat:
-            D = torch.flatten(torch.flatten(D, 1, 2), -2, -1)
-
-        return D
-
-    def forward(self, x):
-        H, W = x.shape[-2:]
-        sid = '%s-%s' % (H,W)
-        if sid not in self.masks:
-            self.masks[sid] = self.make(H, W).to(x.device)
-        mask = self.masks[sid]
-
-        return x * mask[0]
-        # import pdb; pdb.set_trace()
-        # x 
-
 
 
 class TimeCycle(nn.Module):
@@ -146,9 +113,9 @@ class TimeCycle(nn.Module):
         self._kldv_targets = {}
         
         if self.garg('restrict', 0) > 0:
-            self.restrict = RestrictAttention(int(args.restrict))
+            self.restrict = utils.RestrictAttention(int(args.restrict))
         else:
-            self.restrict =  None 
+            self.restrict =  None
 
         self.dropout = torch.nn.Dropout(p=self.dropout_rate, inplace=False)
         self.featdrop = torch.nn.Dropout(p=self.featdrop_rate, inplace=False)
@@ -289,7 +256,7 @@ class TimeCycle(nn.Module):
         if do_dropout and self.dropout_rate > 0:
             mask = self.dropout_mask(A)
             # A = A.clone()
-            A[mask] = 1e-20
+            A[mask] = -1e20
 
         if self.edge == 'softmax':
             # import pdb; pdb.set_trace()

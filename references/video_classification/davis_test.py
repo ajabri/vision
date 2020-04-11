@@ -228,7 +228,7 @@ class DavisSet(data.Dataset):
         onehots = []
         resizes = []
 
-        rsz_h, rsz_w = img.size(1) // self.mapScale[0], img.size(2) // self.mapScale[1]
+        rsz_h, rsz_w = math.ceil(img.size(1) / self.mapScale[0]), math.ceil(img.size(2) /self.mapScale[1])
 
         for i,p in enumerate(lbl_paths):
             prefix = '/' + '/'.join(p.split('.')[:-1])
@@ -245,8 +245,10 @@ class DavisSet(data.Dataset):
             resized = try_np_load(rz_path)
             if resized is None:
                 print('computing resized lbl for', rz_path)
-                resized = cv2.resize(np.float32(onehot), (rsz_h, rsz_w))
+                resized = cv2.resize(np.float32(onehot), (rsz_w, rsz_h))
                 np.save(rz_path, resized)
+
+                # import pdb; pdb.set_trace()
             
             onehots.append(onehot)
             resizes.append(resized)
@@ -265,6 +267,8 @@ class DavisSet(data.Dataset):
         assert lbls_onehot.shape[0] == len(meta['lbl_paths'])
 
         print('vid', i, 'took', time.time() - t000)
+
+        # import pdb; pdb.set_trace()
 
         return imgs, imgs_orig, lblset, lbls_tensor, lbls_onehot, lbls_resize, meta
 
