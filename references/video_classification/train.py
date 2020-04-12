@@ -488,6 +488,11 @@ def parse_args():
     parser.add_argument('--xent-weight', default=False, action='store_true',
         help='use out-going entropy * max similarity as a loss gate')
 
+    parser.add_argument('--no-maxpool', default=False, action='store_true',
+        help='')
+    parser.add_argument('--use-res4', default=False, action='store_true',
+        help='')
+
     args = parser.parse_args()
 
     if args.fast_test:

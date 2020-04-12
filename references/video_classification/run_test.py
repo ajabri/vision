@@ -36,7 +36,7 @@ def test(model, L=5, K=2, T=0.01, opts=[], gpu=0, force=False):
         datapath = '/data/yusun/ajabri/DAVIS/' 
         davis2017path = '/data/yusun/ajabri/davis-2017/'
 
-    model_name = "fixedtemp_truerenorm_all_L%s_K%s_T%s_opts%s_M%s" %(L, K, T, ''.join(opts), model_name) 
+    model_name = "hardprop_fixedtemp_truerenorm_all_L%s_K%s_T%s_opts%s_M%s" %(L, K, T, ''.join(opts), model_name) 
 
     opts = ' '.join(opts)
     cmd = ""
@@ -47,12 +47,13 @@ def test(model, L=5, K=2, T=0.01, opts=[], gpu=0, force=False):
         print('Testing', model_name)
         if (not os.path.isdir(f"{outdir}/results_{model_name}")) or force:# or True:
             cmd += f'''
-                python test_mem.py --filelist {datapath}/vallist.txt {model_str} \
+                python test_sparse.py --filelist {datapath}/vallist.txt {model_str} \
                     --topk_vis {K}   --videoLen {L} --temperature {T} --save-path {outdir}/results_{model_name} \
-                    --workers 5  {opts} --head-depth -1 --gpu-id {gpu} && \
+                    --workers 5  {opts} --gpu-id {gpu} && \
                 '''
                 #.format(model_str=model_str, model_name=model_name, K=K, L=L, T=T, gpu=gpu, outdir=outdir, opts=opts)
 
+            print(cmd)
         cmd += f'''
             python davis/convert_davis.py --in_folder {outdir}/results_{model_name}/ --out_folder {outdir}/converted_{model_name}/ \
                 --dataset {datapath} \
@@ -71,10 +72,10 @@ def sweep(models, L, K, T, size, multiprocess=False, slurm=False, force=False):
     import itertools
 
     # opts = [['--head-depth', str(-1)]] #['--radius', str(10)], ['--radius', str(5)], ['--radius', str(2.5)]] #, ['--all-nn']]
-    base_opts = ['--cropSize', str(size), '--head-depth', str(0), '--all-nn']
+    base_opts = ['--cropSize', str(size), '--head-depth', str(-1), '--all-nn']
 
     # opts = [base_opts + ['--radius', str(10)], base_opts + ['--radius', str(40)], base_opts + ['--radius', str(5)]]
-    opts = [base_opts + ['--radius', str(10)]] #, base_opts + ['--radius', str(5)]]
+    opts = [base_opts + ['--radius', str(20)]] #, base_opts + ['--radius', str(5)]]
 
     prod = list(itertools.product(models, L, K, T, opts))
 

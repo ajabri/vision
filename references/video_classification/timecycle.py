@@ -79,7 +79,8 @@ class TimeCycle(nn.Module):
             self.xent_weight = False
 
         
-        self.encoder = utils.make_encoder(self.model_type).cuda()
+        self.encoder = utils.make_encoder(args).cuda()
+
 
         self.infer_dims()
 
