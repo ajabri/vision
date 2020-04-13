@@ -27,6 +27,15 @@ def info(type, value, tb):
 sys.excepthook = info
 
 
+#########################################################
+# Misc
+#########################################################
+
+
+#########################################################
+# Meters
+#########################################################
+
 class SmoothedValue(object):
     """Track a series of values and provide access to smoothed values over a
     window or the global series average.
@@ -450,7 +459,7 @@ def draw_matches(x1, x2, i1, i2):
         matches = sorted(matches, key = lambda x:x.distance)
 
         # img1 = img2 = np.zeros((40, 40, 3))
-        out = cv2.drawMatches(i1, kps, i2,kps,matches[:], None, flags=2).transpose(2,0,1)
+        out = cv2.drawMatches(i1.astype(np.uint8), kps, i2.astype(np.uint8), kps,matches[:], None, flags=2).transpose(2,0,1)
 
     return out
 
@@ -633,7 +642,7 @@ class PatchGraph(object):
 
 class Visualize(object):
     def __init__(self, args, suffix='metrics', log_interval=2*60):
-        self._env_name = "%s_%s" % (args.name, suffix)
+        self._env_name = "%s-%s" % (args.name, suffix)
         self.vis = visdom.Visdom(
             port=args.port,
             server='http://%s' % args.server,
@@ -892,6 +901,58 @@ class AlternatingLoader:
 ### Visualization Utils
 #################################################################################
     
+
+def nn_pca(f, X, name='', vis=None):    
+    from sklearn.decomposition import PCA, FastICA
+    import visdom
+    import torchvision
+
+    if vis is None:
+        vis = visdom.Visdom(port=8095, env='%s-nn' % name)
+        vis.close()
+
+    # ########################### PCA ###########################
+    K = 50
+    # # pca = PCA(n_components=K, svd_solver='auto', whiten=False)
+    # pca = FastICA(n_components=K, whiten=False)
+
+    # # import pdb; pdb.set_trace()
+
+    # p_f = pca.fit_transform(f.numpy())
+
+    # l = []
+    # import math
+    # step = math.ceil(p_f.shape[0]/300)
+    # i_f = np.argsort(p_f, axis=0)[::step]
+
+    # for k in range(0, K):
+    #     vis.image(torchvision.utils.make_grid(X[i_f[:, k]], nrow=10, padding=2, pad_value=0).cpu().numpy(),
+    #         opts=dict(title='Component %s' % k))
+
+    # f = torch.cat(f1+f2, dim=0)
+    # X = torch.cat(X1+X2, dim=0)
+
+    D = torch.matmul(f,  f.t())
+    X -= X.min(); X /= X.max()
+
+    # f1 = torch.cat(f1, dim=0)
+    # f2 = torch.cat(f2, dim=0)
+
+    # vis.text('NN', opts=dict(width=1000, h=1))
+
+
+    # import pdb; pdb.set_trace()
+
+    ########################### NN  ###########################
+    V, I = torch.topk(D, 50, dim=-1)
+
+    for _k in range(K):
+        k = np.random.randint(X.shape[0])
+        vis.image(torchvision.utils.make_grid(X[I[k]], nrow=10, padding=2, pad_value=0).cpu().numpy(),
+            opts=dict(title='Example %s' % k))
+
+
+
 # def vis_flow(u, v):
 #     flows = []
 #     u, v = u.data.cpu().numpy().astype(np.float32), v.data.cpu().numpy().astype(np.float32)
@@ -1050,11 +1111,12 @@ class From3D(nn.Module):
 
         return mm.view(N, T, *mm.shape[-3:]).permute(0, 2, 1, 3, 4)
 
-def make_encoder(model_type='scratch'):
+def make_encoder(args):
     import resnet3d
     import resnet2d
     import antialiased as aa
     import antialiased.resnet as aa_resnet
+    model_type = args.model_type
 
     if model_type == 'scratch':
         import torchvision.models.video.resnet as _resnet3d
@@ -1065,6 +1127,9 @@ def make_encoder(model_type='scratch'):
         # resnet = resnet2d.resnet34(pretrained=False,)        
 
         resnet = resnet2d.resnet18(pretrained=False)#, norm_layer=norm_layer)
+
+        if args.no_maxpool:
+            resnet.maxpool = None
 
     elif model_type == 'aaresnet':
         resnet = aa_resnet.resnet18(pretrained=False)
@@ -1087,7 +1152,8 @@ def make_encoder(model_type='scratch'):
 
 
     resnet.fc, resnet.avgpool, = None, None
-    resnet.layer4 = None
+    if not args.use_res4:
+        resnet.layer4 = None
 
     if 'Conv2d' in str(resnet):
         resnet = From3D(resnet)
@@ -1149,64 +1215,124 @@ def _initialize_weights(model):
     return model
 
 
-import torch
-from torch.nn.modules.module import Module
-from torch.autograd import Function
-# import correlation_cuda
 
-class CorrelationFunction(Function):
+class RestrictAttention(nn.Module):
+    '''
+    A module that restricts attention
+    '''
+    def __init__(self, radius, flat=True):
+        super(RestrictAttention, self).__init__()
+        self.radius = radius
+        self.flat = flat
+        self.masks = {}
+        self.index = {}
 
-    def __init__(self, pad_size=3, kernel_size=3, max_displacement=20, stride1=1, stride2=2, corr_multiply=1):
-        super(CorrelationFunction, self).__init__()
-        self.pad_size = pad_size
-        self.kernel_size = kernel_size
-        self.max_displacement = max_displacement
-        self.stride1 = stride1
-        self.stride2 = stride2
-        self.corr_multiply = corr_multiply
-        # self.out_channel = ((max_displacement/stride2)*2 + 1) * ((max_displacement/stride2)*2 + 1)
+        self.make(10, 10)
 
-    def forward(self, input1, input2):
-        self.save_for_backward(input1, input2)
+    def mask(self, H, W):
+        if not ('%s-%s' %(H,W) in self.masks):
+            self.make(H, W)
+        return self.masks['%s-%s' %(H,W)]
 
-        with torch.cuda.device_of(input1):
-            rbot1 = input1.new()
-            rbot2 = input2.new()
-            output = input1.new()
+    def index(self, H, W):
+        if not ('%s-%s' %(H,W) in self.index):
+            self.make_index(H, W)
+        return self.index['%s-%s' %(H,W)]
 
-            correlation_cuda.forward(input1, input2, rbot1, rbot2, output, 
-                self.pad_size, self.kernel_size, self.max_displacement,self.stride1, self.stride2, self.corr_multiply)
+    def make(self, H, W):
+        if self.flat:
+            H = int(H**0.5)
+            W = int(W**0.5)
+        
+        gx, gy = torch.meshgrid(torch.arange(0, H), torch.arange(0, W))
+        D = ( (gx[None, None, :, :] - gx[:, :, None, None])**2 + (gy[None, None, :, :] - gy[:, :, None, None])**2 ).float() ** 0.5
+        D = (D < self.radius)[None].float()
 
-        return output
+        if self.flat:
+            D = self.flatten(D)
 
-    def backward(self, grad_output):
-        input1, input2 = self.saved_tensors
+        self.masks['%s-%s' %(H,W)] = D
+        # self.index['%s-%s' %(H,W)] = self.masks['10-10']
 
-        with torch.cuda.device_of(input1):
-            rbot1 = input1.new()
-            rbot2 = input2.new()
+        return D
 
-            grad_input1 = input1.new()
-            grad_input2 = input2.new()
+    def flatten(self, D):
+        return torch.flatten(torch.flatten(D, 1, 2), -2, -1)
 
-            correlation_cuda.backward(input1, input2, rbot1, rbot2, grad_output, grad_input1, grad_input2,
-                self.pad_size, self.kernel_size, self.max_displacement,self.stride1, self.stride2, self.corr_multiply)
+    def make_index(self, H, W, pad=False):
+        
+        mask = self.mask(H, W).view(1, -1).byte()
+        
+        idx = torch.arange(0, mask.numel())[mask[0]][None]
 
-        return grad_input1, grad_input2
+        self.index['%s-%s' %(H,W)] = idx
+
+        return idx
+
+    def make_index2(self, H, W, pad=False):
+        
+        mask = self.mask(H, W).view(1, -1).byte()
+        
+        idx = torch.arange(0, mask.numel())[mask[0]][None]
+
+        self.index['%s-%s' %(H,W)] = idx
+
+        return idx
+        
+    def forward(self, x):
+        H, W = x.shape[-2:]
+        sid = '%s-%s' % (H,W)
+        if sid not in self.masks:
+            self.masks[sid] = self.make(H, W).to(x.device)
+        mask = self.masks[sid]
+
+        return x * mask[0]
 
 
-class Correlation(Module):
-    def __init__(self, pad_size=0, kernel_size=0, max_displacement=0, stride1=1, stride2=2, corr_multiply=1):
-        super(Correlation, self).__init__()
-        self.pad_size = pad_size
-        self.kernel_size = kernel_size
-        self.max_displacement = max_displacement
-        self.stride1 = stride1
-        self.stride2 = stride2
-        self.corr_multiply = corr_multiply
+from spatial_correlation_sampler import SpatialCorrelationSampler
 
-    def forward(self, input1, input2):
+# class Patchifier(nn.Module):
+#     def __init__
 
-        result = CorrelationFunction(self.pad_size, self.kernel_size, self.max_displacement,self.stride1, self.stride2, self.corr_multiply)(input1, input2)
+class Colorizer(nn.Module):
+    def __init__(self, D, R, C=16):
+        super(Colorizer, self).__init__()
+        self.D = 4
+        self.R = 6  # window size
+        self.C = 16
+        self.P = self.R * 2 + 1
 
-        return result
+        self.correlation_sampler = SpatialCorrelationSampler(
+            kernel_size=1,
+            patch_size=self.P,
+            stride=1,
+            padding=0,
+            dilation=1)
+
+    def prep(self, image):
+        _,c,_,_ = image.size()
+        x = F.interpolate(image.float(), scale_factor=(1/self.D), mode='bilinear')
+        if c == 1:
+            x = one_hot(x.long(), self.C)
+        return x
+
+    def forward(self, feats_r, feats_t, quantized_r):
+        b,c,h,w = quantized_r.size()
+
+        r = self.prep(quantized_r)
+        r = F.pad(r, (self.R,self.R,self.R,self.R), mode='replicate')
+
+        corr = self.correlation_sampler(feats_t, feats_r)
+        _,_,_,h1,w1 = corr.size()
+
+        corr[corr == 0] = -1e10  # discount padding at edge for softmax
+        corr = corr.reshape([b, self.P*self.P, h1*w1])
+        corr = F.softmax(corr, dim=1)
+        corr = corr.unsqueeze(1)
+
+        image_uf = F.unfold(r, kernel_size=self.P)
+        image_uf = image_uf.reshape([b,self.C,self.P*self.P,h1*w1])
+
+        out = (corr * image_uf).sum(2).reshape([b,self.C,h1,w1])
+
+        return out

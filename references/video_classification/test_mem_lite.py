@@ -27,6 +27,7 @@ import davis_test as davis
 from scipy.ndimage.morphology import binary_dilation,generate_binary_structure
 from torch.autograd import Variable
 
+import torch.nn.functional as F
 
 params = {}
 
@@ -63,7 +64,7 @@ parser.add_argument('--temperature', default=1.0, type=float,
 
 parser.add_argument('--topk_vis', default=20, type=int,
                     help='topk_vis')
-parser.add_argument('--radius', default=3, type=float,
+parser.add_argument('--radius', default=10, type=int,
                     help='topk_vis')
 parser.add_argument('--all-nn', default=False, action='store_true',
                     help='use all as nn')
@@ -171,6 +172,37 @@ def main():
         test_loss = test(val_loader, model, 1, use_cuda)
             
 
+def dump_predictions(predlbls, lbl_set, img_now, prefix):
+    sz = img_now.shape[:-1]
+
+    predlbls_cp = predlbls.copy()
+    predlbls_cp = cv2.resize(predlbls_cp, sz)
+    predlbls_val = np.zeros((*sz, 3))
+
+    ids = np.argmax(predlbls_cp[:, :, 1 : len(lbl_set)], 2)
+
+    predlbls_val = np.array(lbl_set)[np.argmax(predlbls_cp, axis=-1)]
+    predlbls_val = predlbls_val.astype(np.uint8)
+
+    # if img_now.shape[0] != args.outSize:
+    #     img_now = cv2.resize(img_now, (args.outSize, args.outSize), interpolation=cv2.INTER_LINEAR)
+
+    predlbls_val2 = cv2.resize(predlbls_val, (img_now.shape[1], img_now.shape[0]), interpolation=cv2.INTER_NEAREST)
+
+    # activation_heatmap = cv2.applyColorMap(predlbls, cv2.COLORMAP_JET)
+    img_with_heatmap =  np.float32(img_now) * 0.5 + np.float32(predlbls_val2) * 0.5
+
+    imname  = prefix + '_label.jpg'
+    imname2  = prefix + '_mask.png'
+
+    imageio.imwrite(imname, np.uint8(img_with_heatmap))
+    imageio.imwrite(imname2, np.uint8(predlbls_val))
+
+    if args.visdom:
+        vis.image(np.uint8(img_with_heatmap).transpose(2, 0, 1))
+        vis.image(np.uint8(predlbls_val).transpose(2, 0, 1))
+
+
 def softmax_base(A):
 
     if not args.all_nn:
@@ -182,6 +214,25 @@ def softmax_base(A):
         A = A.view(N, T*H*W, H, W)
         A = torch.nn.functional.softmax(A, dim=-3)
     return A
+
+def extract_values(lbls, ids, weights):
+    T, H, W, L = lbls.shape
+    
+    if args.all_nn:
+        lbls = lbls.view(T*H*W, L)
+        
+        predlbls = batched_index_select(
+            lbls, 0, ids.view(-1))
+        predlbls = (weights.unsqueeze(-1) * \
+            predlbls.view(weights.shape[0], H, W, L)).sum(0)
+    else:
+        lbls = lbls.view(T, H*W, L)
+        predlbls = batched_index_select(
+            lbls, 1, ids.view(T, -1))
+        predlbls = (weights.unsqueeze(-1)/T * \
+            predlbls.view(T, weights.shape[0], H, W, L)).sum(0).sum(0)
+
+    return predlbls
 
 def test(val_loader, model, epoch, use_cuda):
 
@@ -198,98 +249,12 @@ def test(val_loader, model, epoch, use_cuda):
 
     # Radius mask
     D = None
-    def do_label_prop(A, lbl_set, lbls_resize, imgs_toprint, save_path, batch_idx):        
-        ##################################################################
-        # Label propagation
-        ##################################################################
-
-        nstep = len(imgs_toprint) - n_context
-        indices = torch.cat([
-            torch.zeros(nstep, 1).long(),
-            (torch.arange(n_context)[None].repeat(nstep, 1) + torch.arange(nstep)[:, None])[:, 1:]
-            ], dim=-1)
-
-        for it in range(nstep):
-            if it % 10 == 0:
-                print(it)
-
-            t05 = time.time()
-            A_t = A[it].cuda()
-
-            # TODO potentially re-softmax???
-            q_dim = 0 if args.all_nn else 1
-            weights, ids = torch.topk(A_t, topk_vis, dim=q_dim)
-
-            # import pdb; pdb.set_trace()
-            # weights = torch.nn.functional.softmax(weights, dim=1)
-            weights = torch.nn.functional.normalize(weights, dim=q_dim, p=1)
-
-            t06 = time.time()
-            lbls_base = lbls_resize[indices[it]]
-            T, H, W, L = lbls_base.shape
-
-            if q_dim == 0:
-                lbls_base = lbls_base.view(T*H*W, L).cuda()
-                predlbls = batched_index_select(
-                    lbls_base, 0, ids.view(-1))
-                predlbls = (weights.unsqueeze(-1) * predlbls.view(topk_vis, H, W, L)).sum(0)
-            else:
-                lbls_base = lbls_base.view(T, H*W, L).cuda()
-                predlbls = batched_index_select(
-                    lbls_base, 1, ids.view(T, -1))
-                predlbls = (weights.unsqueeze(-1)/T * predlbls.view(T, topk_vis, H, W, L)).sum(0).sum(0)
-
-            img_now = imgs_toprint[it + n_context].permute(1,2,0).numpy() * 255
-            
-            # print(time.time()-t06, 'lbl proc', t06-t05, 'argsorts')
-
-            # normalize across pixels?? labels distribution...
-            # import pdb; pdb.set_trace()
-            # predlbls -= predlbls.min(0)[0].min(0)[0][None, None]
-            # predlbls /= predlbls.max(0)[0].max(0)[0][None, None]
-            # import pdb; pdb.set_trace()
-
-            
-            if it > 0:
-                lbls_resize[it + n_context] = predlbls
-            else:
-                predlbls = lbls_resize[0]
-
-            predlbls_cp = predlbls.cpu().numpy().copy()
-            predlbls_cp = cv2.resize(predlbls_cp, (params['imgSize'], params['imgSize']))
-            predlbls_val = np.zeros((params['imgSize'], params['imgSize'], 3))
-
-            ids = np.argmax(predlbls_cp[:, :, 1 : len(lbl_set)], 2)
-
-            predlbls_val = np.array(lbl_set)[np.argmax(predlbls_cp, axis=-1)]
-            predlbls_val = predlbls_val.astype(np.uint8)
-
-            # if img_now.shape[0] != args.outSize:
-            #     img_now = cv2.resize(img_now, (args.outSize, args.outSize), interpolation=cv2.INTER_LINEAR)
-
-            predlbls_val2 = cv2.resize(predlbls_val, (img_now.shape[0], img_now.shape[1]), interpolation=cv2.INTER_NEAREST)
-
-            # activation_heatmap = cv2.applyColorMap(predlbls, cv2.COLORMAP_JET)
-            img_with_heatmap =  np.float32(img_now) * 0.5 + np.float32(predlbls_val2) * 0.5
-
-            imname  = save_path + str(batch_idx) + '_' + str(it) + '_label.jpg'
-            imname2  = save_path + str(batch_idx) + '_' + str(it) + '_mask.png'
-
-            imageio.imwrite(imname, np.uint8(img_with_heatmap))
-            imageio.imwrite(imname2, np.uint8(predlbls_val))
-
-            if args.visdom:
-                vis.image(np.uint8(img_with_heatmap).transpose(2, 0, 1))
-                vis.image(np.uint8(predlbls_val).transpose(2, 0, 1))
-
-
     t_vid = 0
 
     for batch_idx, (imgs_total, imgs_orig, lbl_set, lbls_tensor, lbls_onehot, lbls_resize, meta) in enumerate(val_loader):
         t_vid = time.time()
         print('******* Vid %s *******' % batch_idx)
 
-            
         # measure data loading time
         imgs_total = imgs_total.cuda()
         bs, total_frame_num, channel_num, height_len, weight_len = imgs_total.shape
@@ -329,16 +294,14 @@ def test(val_loader, model, epoch, use_cuda):
         
         t00 = time.time()
         feats = []
-        nodes = []
         bsize = 50
-        # for b in range(0, imgs_total.shape[1], bsize):
-        #     node, feat = model.module(imgs_total[b:b+bsize], None, True, func='forward')
-        #     feats.append(feat); nodes.append(node)
-        # feats = torch.cat(feats, dim=1)
+        for b in range(0, imgs_total.shape[1], bsize):
+            node, feat = model.module(imgs_total[:, b:b+bsize], None, True, func='forward')
+            feats.append(feat.cpu())
+        feats = torch.cat(feats, dim=2)
         
-        nodes, feats = model.module(imgs_total, None, True, func='forward')
-        # feats = 
-        feats = feats.detach().squeeze(1)
+        # nodes, feats = model.module(imgs_total, None, True, func='forward')
+        feats = feats.squeeze(1)
         feats = torch.nn.functional.normalize(feats, dim=1)
 
         print('computed features', time.time()-t00)
@@ -357,63 +320,106 @@ def test(val_loader, model, epoch, use_cuda):
         # Compute correlation features
         ##################################################################
         
-        imgs_stack = []
+        # torch.cuda.empty_cache()
+
         im_num = total_frame_num - n_context
         t03 = time.time()
-
-        indices = torch.cat([
-            torch.zeros(im_num, 1).long(),
-            (torch.arange(n_context)[None].repeat(im_num, 1) + 
-                torch.arange(im_num)[:, None])[:, 1:]],
+        indices = torch.cat([torch.zeros(im_num, 1).long(),
+            (torch.arange(n_context)[None].repeat(im_num, 1) +  torch.arange(im_num)[:, None])[:, 1:]],
                 dim=-1)
 
-        feats = feats.cpu()
         keys, query = feats[:, :, indices], feats[:, :, n_context:]
 
+        restrict = utils.RestrictAttention(args.radius, flat=False)
         H, W = query.shape[-2:]
-        gx, gy = torch.meshgrid(torch.arange(0, H), torch.arange(0, W))
-        D = ( (gx[None, None, :, :] - gx[:, :, None, None])**2 + (gy[None, None, :, :] - gy[:, :, None, None])**2 ).float() ** 0.5
-        D = (D < args.radius)[None, None].float().cuda()
-        D[D==0] = 1e-10
-        # import pdb; pdb.set_trace()
 
-        As = []
-        bsize = 3
+        
+        D = restrict.mask(H, W)[None].cuda()
+        D[D==0] = -1e10
+        D[D==1] = 0
+
+        rad = int(args.radius)
+        D2 = restrict.mask(H+2*rad, W+2*rad)[..., rad:-rad, rad:-rad]
+        D2[D2==0] = -1
+
+        I2 = torch.arange(0, D2.shape[1]*D2.shape[2]*n_context).view(4, -1)[:, :, None, None]
+        I2 = (D2.flatten(1, 2) * I2)
+        I2 = I2[I2>0].view(1, -1, I2.shape[-2], I2.shape[-1]).long()
+
+        Ws, Is = [], []
+        bsize = 1
         for b in range(0, keys.shape[2], bsize):
-            A = torch.einsum('ijklmn,ijkop->iklmnop', keys[:, :, b:b+bsize].cuda(), query[:, :, b:b+bsize].cuda()) / args.temperature
-            A[0, :, 1:] *= D
+            # import pdb; pdb.set_trace()
+            A = torch.einsum('ijklmn,ijkop->iklmnop',
+                keys[:, :, b:b+bsize].cuda(), query[:, :, b:b+bsize].cuda()) / args.temperature
+            A[0, :, 1:] += D
 
-            A = softmax_base(A[0])[None]
+            # Extract valid regions from the global affinity matrix
+            _A = F.pad(A.permute(0,1,2,-2, -1, -4, -3), [int(args.radius)]*4, 'constant', -1e20).permute(0,1,2,-2, -1, -4, -3)
+            _A = torch.gather(A.flatten(-5,-3), 2, I2[None].cuda())
 
-            As.append(A.cpu())
+            import pdb; pdb.set_trace()
 
-        A = torch.cat(As, dim=1) 
+            _A = F.softmax(_A, dim=2)
+
+            import pdb; pdb.set_trace()
+
+            # TODO MASK OUT A before softmax. And keep a double index
+            # A = softmax_base(A[0])[None]
+
+            # TODO potentially re-softmax???
+            q_dim = 2 if args.all_nn else 3
+            weights, ids = torch.topk(_A, topk_vis, dim=q_dim)
+
+            import pdb; pdb.set_trace()
+
+            # weights = torch.nn.functional.softmax(weights, dim=1)
+            weights = torch.nn.functional.normalize(weights, dim=q_dim, p=1)
+
+            Ws.append(weights.cpu())
+            Is.append(ids.cpu())
+
+        Ws, Is = torch.cat(Ws, 1), torch.cat(Is, 1)
+        # A = torch.cat(As, dim=1) 
+
         t04 = time.time()
-        print(t04-t03, 'model forward')
+        print(t04-t03, 'affinity forward, max mem', torch.cuda.max_memory_allocated() / (1024**2))
 
 
         if isinstance(lbl_set, list):
             lbl_set = torch.cat(lbl_set)[None]
-        
-        # import pdb; pdb.set_trace()
         lbls_resize[0, n_context*2 - 1:] *= 0
-        do_label_prop(A[0], lbl_set[0], lbls_resize[0], imgs_toprint, save_path, batch_idx)
 
+        Ws, Is = Ws[0], Is[0]
+        lbl_set, lbls_resize = lbl_set[0], lbls_resize[0]
+
+
+        ##################################################################
+        # Label propagation
+        ##################################################################
+
+        for it in range(indices.shape[0]):
+            if it % 10 == 0:
+                print(it)
+
+            lbls_base = lbls_resize[indices[it]].cuda()
+            predlbls = extract_values(lbls_base, Is[it].cuda(), Ws[it].cuda())
+            img_now = imgs_toprint[it + n_context].permute(1,2,0).numpy() * 255
+                        
+            if it > 0:
+                lbls_resize[it + n_context] = predlbls
+            else:
+                predlbls = lbls_resize[0]
+
+            
+            # Save Predictions
+            dump_predictions(
+                predlbls.cpu().numpy(),
+                lbl_set, img_now, save_path + str(batch_idx) + '_' + str(it))
+
+        torch.cuda.empty_cache()
         print('******* Vid %s TOOK %s *******' % (batch_idx, time.time() - t_vid))
 
 
-    converted_path = "%s_converted/" % args.save_path[:-1]
-    data_path = os.path.dirname(args.filelist)
-
-    cmd = """python davis/convert_davis.py --in_folder %s --out_folder %s --dataset %s/ && \
-    python %s-2017/python/tools/eval.py -i %s -o %s/results.yaml --year 2017 --phase val \
-    | tee %s/output.txt & """ % (args.save_path, converted_path, data_path, data_path, converted_path, converted_path, converted_path)
-
-    # import pdb; pdb.set_trace()
-
-# python davis/convert_davis.py --in_folder results/ --out_folder results_converted/ --dataset /scratch/ajabri/data/davis/ &&     python /scratch/ajabri/data/davis-2017/python/tools/eval.py -i results_converted/ -o results_converted//results.yaml --year 2017 --phase val     | tee results_converted//output.txt &
-
-
-'python davis/convert_davis.py --in_folder /scratch/ajabri/logs/timecycle/results_123456/ --out_folder /scratch/ajabri/logs/timecycle/results_123456_converted/ --dataset /home/ajabri/data/davis/ &&     python /home/ajabri/data/davis-2017/python/tools/eval.py -i /scratch/ajabri/logs/timecycle/results_123456_converted/ -o /scratch/ajabri/logs/timecycle/results_123456_converted//results.yaml --year 2017 --phase val     | tee /scratch/ajabri/logs/timecycle/results_123456_converted//output.txt & '
 if __name__ == '__main__':
     main()
