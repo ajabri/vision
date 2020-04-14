@@ -488,6 +488,7 @@ class TimeCycle(nn.Module):
 
         return ff, self.xent_coef * sum(xents)/max(1, len(xents)-1), self.kldv_coef * sum(kldvs)/max(1, len(kldvs)-1), diags
 
+
     def kldv_targets(self, A):
         '''
             A: affinity matrix

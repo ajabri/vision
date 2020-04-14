@@ -358,11 +358,11 @@ def test(val_loader, model, epoch, use_cuda):
             _A = F.pad(A.permute(0,1,2,-2, -1, -4, -3), [int(args.radius)]*4, 'constant', -1e20).permute(0,1,2,-2, -1, -4, -3)
             _A = torch.gather(A.flatten(-5,-3), 2, I2[None].cuda())
 
-            import pdb; pdb.set_trace()
+            # import pdb; pdb.set_trace()
 
             _A = F.softmax(_A, dim=2)
 
-            import pdb; pdb.set_trace()
+            # import pdb; pdb.set_trace()
 
             # TODO MASK OUT A before softmax. And keep a double index
             # A = softmax_base(A[0])[None]

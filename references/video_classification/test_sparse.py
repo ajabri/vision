@@ -28,6 +28,8 @@ from scipy.ndimage.morphology import binary_dilation,generate_binary_structure
 from torch.autograd import Variable
 import torch.nn.functional as F
 
+from spatial_correlation_sampler import spatial_correlation_sample
+
 params = {}
 
 
@@ -206,7 +208,7 @@ def main():
             
 
 def softmax_base(A):
-
+    # import pdb; pdb.set_trace()
     if not args.all_nn:
         N, T, H1, W1, H, W = A.shape
         A = A.view(N, T, H1*W1, H, W)
@@ -283,13 +285,13 @@ def test(val_loader, model, epoch, use_cuda):
         ##################################################################
         # Compute image features
         ##################################################################        
-        torch.cuda.empty_cache()
 
         t00 = time.time()
 
         feats = []
         bsize = 50
         for b in range(0, imgs_total.shape[1], bsize):
+            torch.cuda.empty_cache()
             node, feat = model.module(imgs_total[:, b:b+bsize], None, True, func='forward')
             feats.append(feat.cpu())
         feats = torch.cat(feats, dim=2)
@@ -321,12 +323,7 @@ def test(val_loader, model, epoch, use_cuda):
                 torch.arange(im_num)[:, None])[:, 1:]], dim=-1)
 
         feats = feats.cpu()
-        keys, query = feats[:, :, indices], feats[:, :, n_context:]
         
-        # propagator = utils.Colorizer(D=params['mapScale'], R=args.radius)
-        # restrict = utils.RestrictAttention(args.radius)
-        from spatial_correlation_sampler import spatial_correlation_sample
-
         if isinstance(lbl_set, list):
             lbl_set = torch.cat(lbl_set)[None]
         lbls_resize[0, n_context*2 - 1:] *= 0
@@ -336,11 +333,15 @@ def test(val_loader, model, epoch, use_cuda):
 
         As, Ws, Is = [], [], []
 
+        keys, query = feats[:, :, indices], feats[:, :, n_context:]
+
         _, C, N, T, H, W = keys.shape
         # for ease with spatial_correlation_sampler
-        # reshape to 1 x N x T X C X H X W
-        keys = keys.permute(0, 2, 3, 1, 4, 5)
+        keys = keys.permute(0, 2, 3, 1, 4, 5)        # reshape to 1 x N x T X C X H X W
         query = query.permute(0, 2, 1, 3, 4).unsqueeze(2).expand_as(keys)
+
+        q_dim = 2 if args.all_nn else 3
+
         bsize = 2
 
         for b in range(0, keys.shape[1], bsize):
@@ -350,25 +351,27 @@ def test(val_loader, model, epoch, use_cuda):
                     _q.view(_q.shape[1]*T, C, H, W),
                     _k.view(_k.shape[1]*T, C, H, W),
                     patch_size=int(2*args.radius+1))
-            # import pdb; pdb.set_trace()
 
-            A = A.view(1, _q.shape[1], T, *A.shape[-4:])
-            A /= args.temperature
+            A = A.view(1, _q.shape[1], T, *A.shape[-4:]) /args.temperature
             # A[A==0] = -1e20  # ignored idxs in softmax
 
+            _, N, T, H1, W1, H, W = A.shape
+            A1 = A.view(N, T*H1*W1, H, W)
+            weights1, ids1 = torch.topk(A1, topk_vis, dim=-3)
+            weights1 = torch.nn.functional.softmax(weights1, dim=-3)
+            weights, ids = weights1, ids1
+
+            # A = softmax_base(A[0])[None]
+            # weights, ids = torch.topk(A, topk_vis, dim=q_dim)
+            # # weights = torch.nn.functional.softmax(weights, dim=1)             # TODO potentially re-softmax???
+            # weights = torch.nn.functional.normalize(weights, dim=q_dim, p=1)
+            # weights, ids = weights[0], ids[0]
+
             # import pdb; pdb.set_trace()
-            A = softmax_base(A[0])[None]
 
-            # TODO potentially re-softmax???
-            q_dim = 2 if args.all_nn else 3
-            weights, ids = torch.topk(A, topk_vis, dim=q_dim)
-
-            # weights = torch.nn.functional.softmax(weights, dim=1)
-            weights = torch.nn.functional.normalize(weights, dim=q_dim, p=1)
-
-            As += [a for a in A.cpu()[0]]
-            Ws += [w for w in weights.cpu()[0]]
-            Is += [ii for ii in ids.cpu()[0]]
+            # As += [a for a in A.cpu()[0]]
+            Ws += [w for w in weights.cpu()]
+            Is += [ii for ii in ids.cpu()]
 
         # As, Ws, Is = (torch.cat(_, dim=1) for _ in (As, Ws, Is))
 
@@ -393,7 +396,7 @@ def test(val_loader, model, epoch, use_cuda):
             if it % 10 == 0:
                 print(it, torch.cuda.max_memory_allocated()/(1024**2))
 
-            A, weights, idxs = As[it], Ws[it].cuda(), Is[it].cuda()
+            weights, idxs = Ws[it].cuda(), Is[it].cuda()
             lbls_base = lbls_resize[indices[it]].cuda()
             t06 = time.time()
 
@@ -406,7 +409,7 @@ def test(val_loader, model, epoch, use_cuda):
             predlbls = (nn_lbls.view(L, topk_vis, H, W) * weights[None]).sum(1)
 
             # hard prop
-            predlbls = hard_prop(predlbls)
+            # predlbls = hard_prop(predlbls)
 
             img_now = imgs_toprint[it + n_context].permute(1,2,0).numpy() * 255
             
