@@ -83,6 +83,10 @@ parser.add_argument('--server', default='localhost', type=str)
 parser.add_argument('--model-type', default='scratch', type=str)
 parser.add_argument('--head-depth', default=0, type=int,
                     help='')
+
+parser.add_argument('--no-maxpool', default=False, action='store_true', help='')
+parser.add_argument('--use-res4', default=False, action='store_true', help='')
+
 args = parser.parse_args()
 params = {k: v for k, v in args._get_kwargs()}
 
@@ -352,10 +356,9 @@ def test(val_loader, model, epoch, use_cuda):
             # weights = torch.nn.functional.softmax(weights, dim=1)
             weights = torch.nn.functional.normalize(weights, dim=q_dim, p=1)
 
-            # As.append(A)
-            As.append(A.cpu()[0])
-            Ws.append(weights.cpu()[0])
-            Is.append(ids.cpu()[0])
+            As += [a for a in A.cpu()[0]]
+            Ws += [w for w in weights.cpu()[0]]
+            Is += [ii for ii in ids.cpu()[0]]
 
         # As, Ws, Is = (torch.cat(_, dim=1) for _ in (As, Ws, Is))
 

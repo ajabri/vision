@@ -36,7 +36,8 @@ def test(model, L=5, K=2, T=0.01, opts=[], gpu=0, force=False):
         datapath = '/data/yusun/ajabri/DAVIS/' 
         davis2017path = '/data/yusun/ajabri/davis-2017/'
 
-    model_name = "hardprop_fixedtemp_truerenorm_all_L%s_K%s_T%s_opts%s_M%s" %(L, K, T, ''.join(opts), model_name) 
+    # model_name = "hardprop_fixedtemp_truerenorm_all_L%s_K%s_T%s_opts%s_M%s" %(L, K, T, ''.join(opts), model_name) 
+    model_name = "L%s_K%s_T%s_opts%s_M%s" %(L, K, T, ''.join(opts), model_name) 
 
     opts = ' '.join(opts)
     cmd = ""
@@ -68,14 +69,14 @@ def test(model, L=5, K=2, T=0.01, opts=[], gpu=0, force=False):
     return yaml.load(open(outfile))['dataset']
 
 
-def sweep(models, L, K, T, size, multiprocess=False, slurm=False, force=False):
+def sweep(models, L, K, T, size, multiprocess=False, slurm=False, force=False, gpu=-1):
     import itertools
 
     # opts = [['--head-depth', str(-1)]] #['--radius', str(10)], ['--radius', str(5)], ['--radius', str(2.5)]] #, ['--all-nn']]
-    base_opts = ['--cropSize', str(size), '--head-depth', str(-1), '--all-nn']
+    base_opts = ['--cropSize', str(size), '--head-depth', str(-1), '--all-nn',  '--no-maxpool'] # '--use-res4']
 
     # opts = [base_opts + ['--radius', str(10)], base_opts + ['--radius', str(40)], base_opts + ['--radius', str(5)]]
-    opts = [base_opts + ['--radius', str(20)]] #, base_opts + ['--radius', str(5)]]
+    opts = [base_opts + ['--radius', str(10)]] #, base_opts + ['--radius', str(5)]]
 
     prod = list(itertools.product(models, L, K, T, opts))
 
@@ -108,7 +109,7 @@ def sweep(models, L, K, T, size, multiprocess=False, slurm=False, force=False):
     else:
         print(prod)
         for i in range(0, len(prod)):
-            test(*prod[i], 0, force)
+            test(*prod[i], 0 if gpu == -1 else gpu, force)
 
 
 
@@ -169,6 +170,7 @@ if __name__ == '__main__':
     parser.add_argument('--T', default=[0.1], type=float, nargs='+')
 
     parser.add_argument('--cropSize', default=480, type=int)
+    parser.add_argument('--gpu', default=0, type=int)
     
     args = parser.parse_args()
     
@@ -176,7 +178,12 @@ if __name__ == '__main__':
         args.model_path = models
 
     if args.slurm:
-        sweep(args.model_path, args.L, args.K, args.T, args.cropSize, slurm=args.slurm, force=args.force)
+        sweep(args.model_path, args.L, args.K, args.T, args.cropSize,
+            slurm=args.slurm,
+            force=args.force)
         
     else:
-        sweep(args.model_path, args.L, args.K, args.T, args.cropSize, multiprocess=args.multiprocess, force=args.force)
+        sweep(args.model_path, args.L, args.K, args.T, args.cropSize,
+            multiprocess=args.multiprocess,
+            force=args.force,
+            gpu=args.gpu)
