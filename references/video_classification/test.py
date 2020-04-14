@@ -83,6 +83,11 @@ parser.add_argument('--server', default='localhost', type=str)
 parser.add_argument('--model-type', default='scratch', type=str)
 parser.add_argument('--head-depth', default=0, type=int,
                     help='')
+parser.add_argument('--no-maxpool', default=False, action='store_true',
+    help='')
+parser.add_argument('--use-res4', default=False, action='store_true',
+    help='')
+
 args = parser.parse_args()
 params = {k: v for k, v in args._get_kwargs()}
 

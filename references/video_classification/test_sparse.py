@@ -213,6 +213,14 @@ def softmax_base(A):
         A = torch.nn.functional.softmax(A, dim=-3)
     return A
 
+def hard_prop(predlbls):
+    # pred_max = predlbls.max(axis=0)[0]
+    # predlbls[predlbls <  pred_max] = 0
+    # predlbls[predlbls >= pred_max] = 1
+    # predlbls /= predlbls.sum(0)[None]
+    return predlbls
+    # import pdb; pdb.set_trace()
+
 def test(val_loader, model, epoch, use_cuda):
 
     save_path = args.save_path + '/'
@@ -318,6 +326,8 @@ def test(val_loader, model, epoch, use_cuda):
         if isinstance(lbl_set, list):
             lbl_set = torch.cat(lbl_set)[None]
         lbls_resize[0, n_context*2 - 1:] *= 0
+        
+        # H x W x L -> L x H x W
         lbls_resize = lbls_resize.transpose(-1,-3).transpose(-1,-2)
 
         As, Ws, Is = [], [], []
@@ -393,11 +403,7 @@ def test(val_loader, model, epoch, use_cuda):
             predlbls = (nn_lbls.view(L, topk_vis, H, W) * weights[None]).sum(1)
 
             # hard prop
-            # pred_max = predlbls.max(axis=0)[0]
-            # predlbls[predlbls <  pred_max] = 0
-            # predlbls[predlbls >= pred_max] = 1
-            # predlbls /= predlbls.sum(0)[None]
-            # import pdb; pdb.set_trace()
+            predlbls = hard_prop(predlbls)
 
             img_now = imgs_toprint[it + n_context].permute(1,2,0).numpy() * 255
             

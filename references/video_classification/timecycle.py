@@ -481,8 +481,8 @@ class TimeCycle(nn.Module):
 
             utils.nn_patches(self.viz, all_x, all_A[None])
 
-        for k in diags:
-            # import pdb; pdb.set_trace()
+        diag_keys = list(diags.keys())
+        for k in diag_keys:
             diags["%s %s" % (H, k)] = diags[k]
             del diags[k]
 
