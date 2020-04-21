@@ -16,12 +16,14 @@ import scipy.io as sio
 import scipy.misc
 
 class VideoList(data.Dataset):
-    def __init__(self, filelist, clip_len, is_train=True, frame_gap=1, transform=None):
+    def __init__(self, filelist, clip_len, is_train=True, frame_gap=1, transform=None, random_clip=True):
 
         self.filelist = filelist
         self.clip_len = clip_len
         self.is_train = is_train
         self.frame_gap = frame_gap
+
+        self.random_clip = random_clip
 
         self.transform = transform
         
@@ -59,18 +61,25 @@ class VideoList(data.Dataset):
             print('framegap adjusted to ', frame_gap, 'for', folder_path)
         
         diffnum = fnum - self.clip_len * frame_gap
-        startframe = random.randint(0, diffnum)
+        if self.random_clip:
+            startframe = random.randint(0, diffnum)
+        else:
+            startframe = 0
 
         files = os.listdir(folder_path)
+        files.sort(key=lambda x:int(x.split('.')[0]))
+        
         imgs = []
-
+        
         # reading video
         for i in range(self.clip_len):
             idx = int(startframe + i * frame_gap)
 
 #             import pdb; pdb.set_trace()
             img_path = "%s/%s" % (folder_path, files[idx])
-            img = cv2.imread(img_path) #.astype(np.float32)
+
+            # BGR -> RGB!!!
+            img = cv2.imread(img_path)[:,:,::-1] #.astype(np.faloat32)  
             # print(img.shape)
             imgs.append(img)
 

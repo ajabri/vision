@@ -473,21 +473,24 @@ class PatchGraph(object):
         y, x = i // self.W, i % self.W
         cx, cy = [int((self.w + self.pad) * (x  + 0.5)), int((self.h + self.pad) * (y  + 0.5))]
 
-        def _blend(x):
-            x = x[...,:-self.pad, :-self.pad] if self.pad > 0 else x
-            x = (0.5 * self.maps[i] + 0.5 * x).copy() * 255
-            return x
+        def _blend(img, mask):
+            img = img[...,:-self.pad, :-self.pad] if self.pad > 0 else img
+            img = (0.5 * mask[i] + 0.5 * img).copy() * 255
+            # import pdb; pdb.set_trace()
+
+            return img
 
         img1 = self.grid[0]*255.0
-        img2 = _blend(self.grid[1])
         img1[:, cy-5:cy+5, cx-5:cx+5] = 255
-        # import pdb; pdb.set_trace()
 
-        return np.concatenate([img1, img2], axis=-1), None
+        key_imgs = [_blend(self.grid[j+1], self.maps[j]) for j in range(0, len(self.maps))]
+
+        return np.concatenate([img1] + key_imgs, axis=-1), None
 
     def update(self):
-        self.viz.image(self.curr[0], win=self.win_id, env=self.viz.env+'_pg')
-        # self.viz.image(self.curr[1], win=self.win_id2, env=self.viz.env+'_pg')
+        if self.viz is not None:
+            self.viz.image(self.curr[0], win=self.win_id, env=self.viz.env+'_pg')
+            # self.viz.image(self.curr[1], win=self.win_id2, env=self.viz.env+'_pg')
 
     def make_canvas(self, I, orig, N):
         # import pdb; pdb.set_trace()
@@ -511,22 +514,26 @@ class PatchGraph(object):
         
         return grid
 
-    def __init__(self, viz, I, A, win='patchgraph', orig=None):
+    def __init__(self, I, A, viz=None, win='patchgraph', orig=None):
         self._win = win
         self.viz = viz
         self._birth = time.time()
 
-        P, C, T, h, w = I.shape
+        if self.viz is not None:
+            self.viz.close(self.viz.env+'_pg')
+
+        P, T, C, h, w = I.shape  # P is patches per image, 1 means whole image
         N = A.shape[-1]
         H = W = int(N ** 0.5)
-        self.N, self.H, self.W, self.h, self.w = N, H, W, h, w
 
+        self.N, self.H, self.W, self.h, self.w = N, H, W, h, w
         if P == 1:
             self.w, self.h = self.w // W, self.h // H
 
         I = I.cpu()
         orig = orig.cpu()
-        A = A.view(H * W, H, W).cpu() #.transpose(-1, -2)
+
+        A = A.view(A.shape[0], H * W, H, W).cpu() #.transpose(-1, -2)
 
         # psize = min(2000 // H, I.shape[-1])
         # if psize < I.shape[-1]:
@@ -551,27 +558,34 @@ class PatchGraph(object):
 
         zeros = np.zeros(self.grid[0].shape).transpose(1,2,0)
         maps = []
-        for a in A[:, :, :, None].cpu().detach().numpy():
-            _a = cv2.resize(a, (map_sz, map_sz), interpolation=cv2.INTER_NEAREST)
-            _a = self.color(_a)[...,:3]
-            a = zeros.copy()
-            if lpad > 0 and rpad > 0:
-                a[lpad:-rpad, lpad:-rpad, :] = _a
-            else:
-                a = _a
-            maps.append(a)
 
-        self.maps = np.array(maps).transpose(0, -1, 1, 2)
+        for A_t in A[..., None].numpy():
+            maps.append([])
+            for a in A_t:
+                _a = cv2.resize(a, (map_sz, map_sz), interpolation=cv2.INTER_NEAREST)
+                _a = _a**10
+                _a /= _a.max()
+                _a = self.color(_a * 255.0)[...,:3]
+                a = zeros.copy()
+                if lpad > 0 and rpad > 0:
+                    a[lpad:-rpad, lpad:-rpad, :] = _a
+                else:
+                    a = _a
+                
+                maps[-1].append(a)
+        
+        self.maps = np.array(maps).transpose(0, 1, -1, 2, 3)
 
         ####################################################################
         # Set first image
 
-        self.curr_id = N//2
+        self.curr_id = (H//2) * W + W//2
         self.curr = self.blend(self.curr_id)
         # viz.text('', opts=dict(width=10000, height=2), env=viz.env+'_pg')
         
         self.win_id = self._win 
         self.win_id2 = self._win+'2'
+        self.win_id_text = self._win+'_text'
 
         self.update()
         ####################################################################
@@ -628,14 +642,13 @@ class PatchGraph(object):
                 coords = "x: {}, y: {};".format(
                     event['image_coord']['x'], event['image_coord']['y']
                 )
-                viz.text(coords, win=self.win_id_text, env=viz.env+'_pg')
+                x, y = event['image_coord']['x'], event['image_coord']['y']
+                self.curr_id = int( (y // self.h) * self.W + (x // self.w))
+                self.curr = self.blend(self.curr_id)
+                self.update()
 
-                self.curr = self.blend(np.random.randint(N))
-
-                viz.image(self.curr, win=self.win_id, env=viz.env+'_pg')
-
-
-        viz.register_event_handler(callback, self.win_id)
+        if viz is not None:
+            viz.register_event_handler(callback, self.win_id)
         # viz.register_event_handler(callback, self.win_id_text)
         # import pdb; pdb.set_trace()
 

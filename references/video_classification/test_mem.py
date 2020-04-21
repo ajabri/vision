@@ -83,6 +83,12 @@ parser.add_argument('--server', default='localhost', type=str)
 parser.add_argument('--model-type', default='scratch', type=str)
 parser.add_argument('--head-depth', default=0, type=int,
                     help='')
+
+parser.add_argument('--no-maxpool', default=False, action='store_true', help='')
+parser.add_argument('--use-res4', default=False, action='store_true', help='')
+
+parser.add_argument('--long-mem', default=[0], type=int, nargs='+', help='')
+
 args = parser.parse_args()
 params = {k: v for k, v in args._get_kwargs()}
 
@@ -100,7 +106,7 @@ use_cuda = torch.cuda.is_available()
 print(args.gpu_id)
 
 import visdom
-vis = visdom.Visdom(server=args.server, port=8095, env='main'); vis.close()
+vis = visdom.Visdom(server=args.server, port=8095, env='main_davis_viz'); vis.close()
 
 
 # Random seed
@@ -175,7 +181,8 @@ def dump_predictions(predlbls, lbl_set, img_now, prefix):
     sz = img_now.shape[:-1]
 
     predlbls_cp = predlbls.copy()
-    predlbls_cp = cv2.resize(predlbls_cp, sz)
+    predlbls_cp = cv2.resize(predlbls_cp, sz[::-1])
+    # import pdb; pdb.set_trace()
     predlbls_val = np.zeros((*sz, 3))
 
     ids = np.argmax(predlbls_cp[:, :, 1 : len(lbl_set)], 2)
@@ -233,6 +240,13 @@ def extract_values(lbls, ids, weights):
         predlbls = (weights.unsqueeze(-1)/T * \
             predlbls.view(T, weights.shape[0], H, W, L)).sum(0).sum(0)
 
+    return predlbls
+
+def hard_prop(predlbls):
+    pred_max = predlbls.max(axis=0)[0]
+    predlbls[predlbls <  pred_max] = 0
+    predlbls[predlbls >= pred_max] = 1
+    predlbls /= predlbls.sum(0)[None]
     return predlbls
 
 def test(val_loader, model, epoch, use_cuda):
@@ -295,7 +309,7 @@ def test(val_loader, model, epoch, use_cuda):
         
         t00 = time.time()
         feats = []
-        bsize = 50
+        bsize = 5
         for b in range(0, imgs_total.shape[1], bsize):
             node, feat = model.module(imgs_total[:, b:b+bsize], None, True, func='forward')
             feats.append(feat.cpu())
@@ -325,56 +339,75 @@ def test(val_loader, model, epoch, use_cuda):
 
         im_num = total_frame_num - n_context
         t03 = time.time()
-        indices = torch.cat([torch.zeros(im_num, 1).long(),
-            (torch.arange(n_context)[None].repeat(im_num, 1) +  torch.arange(im_num)[:, None])[:, 1:]],
-                dim=-1)
 
+        def make_bank():
+            ll = []
+            
+            for t in args.long_mem:
+                idx = torch.zeros(im_num, 1).long()
+                if t > 0:
+                    assert t < im_num
+                    idx += t + (args.videoLen+1)
+                    idx[:args.videoLen+t+1] = 0
+
+                ll.append(idx)
+
+            ss = [(torch.arange(n_context)[None].repeat(im_num, 1) + 
+                    torch.arange(im_num)[:, None])[:, 1:]
+            ]
+
+            return ll + ss
+                
+        indices = torch.cat(make_bank(), dim=-1)
         keys, query = feats[:, :, indices], feats[:, :, n_context:]
 
         restrict = utils.RestrictAttention(args.radius, flat=False)
-        H, W = query.shape[-2:]
-        D = restrict.mask(H, W)[None].cuda()
-        D[D==0] = -1e10
-        D[D==1] = 0
+        D = restrict.mask(*query.shape[-2:])[None]
+        D = D.flatten(-4, -3).flatten(-2)
+        D[D==0] = -1e10; D[D==1] = 0
 
         Ws, Is = [], []
-        bsize = 1
+        keys, query = keys.flatten(-2), query.flatten(-2)
+
+        bsize, pbsize = 2, 100
+
         for b in range(0, keys.shape[2], bsize):
-            # import pdb; pdb.set_trace()
-            A = torch.einsum('ijklmn,ijkop->iklmnop', keys[:, :, b:b+bsize].cuda(), query[:, :, b:b+bsize].cuda()) / args.temperature
-            # import pdb; pdb.set_trace()
-            A[0, :, 1:] += D
+            _k, _q = keys[:, :, b:b+bsize].cuda(), query[:, :, b:b+bsize].cuda()
+            w_s, i_s = [], []
 
-            # TODO MASK OUT A before softmax. And keep a double index
+            for pb in range(0, _k.shape[-1], pbsize):
+                # A = torch.einsum('ijklmn,ijkop->iklmnop', _k, _q) / args.temperature
+                A = torch.einsum('ijklm,ijkn->iklmn',
+                    _k, _q[..., pb:pb+pbsize]) 
+                
+                A[0, :, len(args.long_mem):] += D[..., pb:pb+pbsize].cuda()
+
+                _, N, T, h1w1, hw = A.shape
+                A = A.view(N, T*h1w1, hw)
+                A /= args.temperature
+
+                weights, ids = torch.topk(A, topk_vis, dim=-2)
+                weights = torch.nn.functional.softmax(weights, dim=-2)
+                
+                w_s.append(weights.cpu())
+                i_s.append(ids.cpu())
+
             # import pdb; pdb.set_trace()
-            A = softmax_base(A[0])[None]
-            # import pdb; pdb.set_trace()
 
-            # TODO potentially re-softmax???
-            q_dim = 2 if args.all_nn else 3
-            weights, ids = torch.topk(A, topk_vis, dim=q_dim)
+            weights = torch.cat(w_s, dim=-1)
+            ids = torch.cat(i_s, dim=-1)
+            Ws += [w for w in weights]
+            Is += [ii for ii in ids]
 
-            # import pdb; pdb.set_trace()
-            # weights = torch.nn.functional.softmax(weights, dim=1)
-            weights = torch.nn.functional.normalize(weights, dim=q_dim, p=1)
-
-            Ws.append(weights.cpu())
-            Is.append(ids.cpu())
-
-        Ws, Is = torch.cat(Ws, 1), torch.cat(Is, 1)
-        # A = torch.cat(As, dim=1) 
+        # Ws, Is = torch.cat(Ws, 1), torch.cat(Is, 1)         # A = torch.cat(As, dim=1) 
 
         t04 = time.time()
         print(t04-t03, 'affinity forward, max mem', torch.cuda.max_memory_allocated() / (1024**2))
 
-
         if isinstance(lbl_set, list):
             lbl_set = torch.cat(lbl_set)[None]
         lbls_resize[0, n_context*2 - 1:] *= 0
-
-        Ws, Is = Ws[0], Is[0]
         lbl_set, lbls_resize = lbl_set[0], lbls_resize[0]
-
 
         ##################################################################
         # Label propagation
@@ -385,7 +418,15 @@ def test(val_loader, model, epoch, use_cuda):
                 print(it)
 
             lbls_base = lbls_resize[indices[it]].cuda()
-            predlbls = extract_values(lbls_base, Is[it].cuda(), Ws[it].cuda())
+            flat_lbls = lbls_base.flatten(0, 2).transpose(0, 1)
+
+            predlbls = (flat_lbls[:, Is[it]] * Ws[it].cuda()[None]).sum(1)
+            predlbls = predlbls.view(-1, *feats.shape[-2:])
+
+            predlbls = hard_prop(predlbls)
+
+            predlbls = predlbls.permute(1,2,0)
+
             img_now = imgs_toprint[it + n_context].permute(1,2,0).numpy() * 255
                         
             if it > 0:
@@ -393,7 +434,6 @@ def test(val_loader, model, epoch, use_cuda):
             else:
                 predlbls = lbls_resize[0]
 
-            
             # Save Predictions
             dump_predictions(
                 predlbls.cpu().numpy(),

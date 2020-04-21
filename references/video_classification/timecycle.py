@@ -344,7 +344,7 @@ class TimeCycle(nn.Module):
 
         # x = F.dropout(x)
     
-        if _N == 1 and visualize:
+        if _N == 1 and visualize and False:
             # patchify with unfold
             _sz, res = 80, 10
             stride = utils.get_stride(H, _sz, res)
@@ -395,18 +395,38 @@ class TimeCycle(nn.Module):
         
         L = len(t_pairs)
 
+        #################################################################
+        # PatchGraph
+        #################################################################
+        
         if np.random.random() < 0.05 or visualize:
-            if ff.device.index == 0:
-                for i in range(B):
-                    pg_win = 'patchgraph_%s'%i
-                    # print('exists', self.viz.win_exists(pg_win, env=self.viz.env+'_pg'))
-                    if not self.viz.win_exists(pg_win, env=self.viz.env+'_pg') or visualize:
-                        tviz = 0
-                        self.viz.clear_event_handlers(pg_win)
-                        A = self.compute_affinity(ff[i:i+1, :, tviz], ff[i:i+1, :, tviz+1], do_dropout=False)
-                        pg = utils.PatchGraph(self.viz,
-                            x[i, :, :, tviz:tviz+2].transpose(1, 2),
-                            A[0], win=pg_win, orig=orig)
+            with torch.no_grad():
+
+                if ff.device.index == 0:
+                    for i in range(B):
+                        pg_win = 'patchgraph_%s'%i
+                        # print('exists', self.viz.win_exists(pg_win, env=self.viz.env+'_pg'))
+                        if not self.viz.win_exists(pg_win, env=self.viz.env+'_pg') or visualize:
+                            tviz = 0
+                            self.viz.clear_event_handlers(pg_win)
+                            fff = ff[i].transpose(0,1)
+                            A_traj = self.compute_affinity(ff[i].transpose(0,1)[:-1] , ff[i].transpose(0,1)[1:], do_dropout=False)
+
+                            A_t = [self.stoch_mat(A_traj[0])]
+                            for A_tp1 in A_traj[1:]:
+                                A_t.append(self.stoch_mat(A_tp1) @ A_t[-1])
+
+                            # A_t = [F.softmax(A_traj[0], dim=-1)]
+                            # for A_tp1 in A_traj[1:]:
+                            #     A_t.append(F.softmax(A_tp1, dim=-1) @ A_t[-1])
+
+                            A_t = torch.stack(A_t)
+                            pg = utils.PatchGraph(x[i, :, :].transpose(1, 2),
+                                A_t, viz=self.viz,win=pg_win, orig=orig) 
+
+        #################################################################
+        # Build all graph once!
+        #################################################################
 
         if len(t_pairs) > 0:
             for (t1, t2) in t_pairs:
@@ -436,7 +456,8 @@ class TimeCycle(nn.Module):
 
                 if np.random.random() < (0.05 / len(t_pairs)) or visualize:
                     self.viz.text('%s %s' % (t1, t2), opts=dict(height=1, width=10000), win='div')
-                    self.visualize_frame_pair(x, ff, mm, t1, t2)
+                    with torch.no_grad():
+                        self.visualize_frame_pair(x, ff, mm, t1, t2)
 
 
             # longer cycle:
@@ -479,7 +500,8 @@ class TimeCycle(nn.Module):
             all_f = all_f.reshape(-1, *all_f.shape[-1:])
             all_A = torch.einsum('ij,kj->ik', all_f, all_f)
 
-            utils.nn_patches(self.viz, all_x, all_A[None])
+            with torch.no_grad():
+                utils.nn_patches(self.viz, all_x, all_A[None])
 
         diag_keys = list(diags.keys())
         for k in diag_keys:

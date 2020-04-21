@@ -24,7 +24,7 @@ try:
 except ImportError:
     amp = None
 
-def visualize(model, data_loader, device, vis=None):
+def nn_visualize(model, data_loader, device, vis=None):
 
     header = 'Visualizing'
     f1 = []
@@ -34,9 +34,6 @@ def visualize(model, data_loader, device, vis=None):
         print('#### %s ####' % i)
 
         video = video.to(device)
-        # video -= video.min(); video /= video.max()
-        # [vis.vis.images(v, env='viz_kinetics') for v in video]
-
         f, m = model(video, orig=orig, just_feats=True)
 
         feats = torch.nn.functional.normalize(m.sum(-1).sum(-1).transpose(-1, -2).contiguous().view(-1, m.shape[1]), dim=-1, p=2).detach().cpu()
@@ -46,21 +43,65 @@ def visualize(model, data_loader, device, vis=None):
         if len(f1) > 50:
             break
 
-        # import pdb; pdb.set_trace()
-
-        # output, xent_loss, kldv_loss, diagnostics = model(video, orig=orig, visualize=True)
-        # loss = (xent_loss.mean() + kldv_loss.mean())
-
-        # input('#### %s Done ####' % i)
-        
-        # if vis is not None and np.random.random() < 0.01:
-        #     vis.log('xent_loss', xent_loss.mean().item())
-        #     vis.log('kldv_loss', kldv_loss.mean().item())
-        #     for k,v in diagnostics.items():
-        #         vis.log(k, v.mean().item())
-
     utils.nn_pca(torch.cat(f1), torch.cat(X1), name='timecycle-nn')
     import pdb; pdb.set_trace()
+        
+def visualize(model, data_loader, device, vis=None):
+    import torch.nn.functional as F
+    import time
+
+    M = [] # list of tuples of diffusion videos
+    model_module = model if not hasattr(model, 'module') else model.module
+
+    for i, (video, orig) in enumerate(data_loader):
+        start_time = time.time()
+
+        video = video.to(device)
+        # video -= video.min(); video /= video.max()
+        # [vis.vis.images(v, env='viz_kinetics') for v in video]
+
+        feats, _ = model(video, orig=orig, just_feats=True)
+        tviz = 0
+        
+        def diffusion_maps(ff, xx, softmax_temp=None, name=''):
+            if softmax_temp is None:
+                softmax_temp = model_module.temperature
+
+            with torch.no_grad():
+                ff = ff.transpose(0,1)
+                A_traj = model_module.compute_affinity(ff[:-1] , ff[1:], do_dropout=False)
+
+                # A_t = [model.stoch_mat(A_traj[0])]
+                # for A_tp1 in A_traj[1:]:
+                #     A_t.append(model.stoch_mat(A_tp1) @ A_t[-1])
+
+                A_t = [F.softmax(A_traj[0]/softmax_temp, dim=-1)]
+                for A_tp1 in A_traj[1:]:
+                    A_t.append(F.softmax(A_tp1/softmax_temp, dim=-1) @ A_t[-1])
+
+                A_t = torch.stack(A_t)
+
+                # import pdb; pdb.set_trace()
+                pg = utils.PatchGraph(xx, A_t, orig=orig,
+                    viz=vis.vis, win='patchgraph_%s' % str(name))
+
+                # return [pg.blend(i)[0] for i in range(pg.N)]
+
+        for j, ff in enumerate(feats):
+            maps = [
+                diffusion_maps(
+                    ff, video[j:j+1, :, :],
+                    softmax_temp=stemp, name='%s-%s-%s-%s' %(i,j,stemp, str(time.time())))
+                for stemp in [0.05]
+            ]
+            M.append(maps)
+
+
+        if (i+1) % 4 == 0:
+            # import pdb; pdb.set_trace()
+            input('#### %s #### %s' % (i, 'Next visualizations?'))
+        
+        
         
 def train_one_epoch(model, criterion, optimizer, lr_scheduler, data_loader, device, epoch, print_freq,
     apex=False, max_steps=1e10, vis=None, checkpoint_fn=None):
@@ -199,6 +240,7 @@ def main(args):
                     is_train=is_train,
                     frame_gap=args.frame_skip,
                     transform=_transform,
+                    random_clip=True,
                     # frame_transform=_frame_transform
                 )
 
@@ -248,7 +290,7 @@ def main(args):
 
     # 64px
     data_loader_64 = torch.utils.data.DataLoader(
-        dataset, batch_size=args.batch_size,
+        dataset, batch_size=args.batch_size, shuffle=not args.fast_test,
         sampler=train_sampler, num_workers=args.workers//2,
         pin_memory=True, collate_fn=collate_fn)
 
@@ -456,7 +498,7 @@ def parse_args():
     parser.add_argument('--npatch', default=5, type=int, help='number of patches sampled')
 
     # patchifying args
-    parser.add_argument('--pstride', default=[1.0, 1.0], nargs=2,
+    parser.add_argument('--pstride', default=[0.5, 0.5], nargs=2,
         type=float, help='random sample patchify stride from [this*patch_size, patch_size]')
     parser.add_argument('--npatch-scale', default=[0.2, 0.8], nargs=2,
         type=float, help='range from which to same patch sizes for random patch sampling')

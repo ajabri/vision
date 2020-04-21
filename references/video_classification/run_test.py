@@ -39,6 +39,11 @@ def test(model, L=5, K=2, T=0.01, opts=[], gpu=0, force=False):
     # model_name = "hardprop_fixedtemp_truerenorm_all_L%s_K%s_T%s_opts%s_M%s" %(L, K, T, ''.join(opts), model_name) 
     model_name = "L%s_K%s_T%s_opts%s_M%s" %(L, K, T, ''.join(opts), model_name) 
 
+    if 'nopool' in model_name:
+        opts += ['--no-maxpool']
+    if 'res4' in model_name:
+        opts += ['--use-res4']
+
     opts = ' '.join(opts)
     cmd = ""
 
@@ -48,7 +53,7 @@ def test(model, L=5, K=2, T=0.01, opts=[], gpu=0, force=False):
         print('Testing', model_name)
         if (not os.path.isdir(f"{outdir}/results_{model_name}")) or force:# or True:
             cmd += f'''
-                python test_sparse.py --filelist {datapath}/vallist.txt {model_str} \
+                python test_mem.py --filelist {datapath}/vallist.txt {model_str} \
                     --topk_vis {K}   --videoLen {L} --temperature {T} --save-path {outdir}/results_{model_name} \
                     --workers 5  {opts} --gpu-id {gpu} && \
                 '''
@@ -73,10 +78,15 @@ def sweep(models, L, K, T, size, multiprocess=False, slurm=False, force=False, g
     import itertools
 
     # opts = [['--head-depth', str(-1)]] #['--radius', str(10)], ['--radius', str(5)], ['--radius', str(2.5)]] #, ['--all-nn']]
-    base_opts = ['--cropSize', str(size), '--head-depth', str(-1), '--all-nn',  '--no-maxpool'] # '--use-res4']
+    base_opts = ['--cropSize', str(size), '--head-depth', str(-1), '--all-nn',
+    #   '--no-maxpool',
+    #   '--use-res4'
+      ]
 
     # opts = [base_opts + ['--radius', str(10)], base_opts + ['--radius', str(40)], base_opts + ['--radius', str(5)]]
-    opts = [base_opts + ['--radius', str(10)]] #, base_opts + ['--radius', str(5)]]
+    # opts = [base_opts + ['--radius', str(10), '--long-mem','0', '5', '10', '15']] #, base_opts + ['--radius', str(5)]]
+    opts = [base_opts + ['--radius', str(10), '--long-mem','0']] #, base_opts + ['--radius', str(5)]]
+    # opts = [base_opts + ['--radius', str(10)]] #, base_opts + ['--radius', str(5)]]
 
     prod = list(itertools.product(models, L, K, T, opts))
 

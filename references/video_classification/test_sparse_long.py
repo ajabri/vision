@@ -83,11 +83,12 @@ parser.add_argument('--save-path', default='./results', type=str)
 parser.add_argument('--visdom', default=False, action='store_true')
 parser.add_argument('--server', default='localhost', type=str)
 parser.add_argument('--model-type', default='scratch', type=str)
-parser.add_argument('--head-depth', default=0, type=int,
-                    help='')
+parser.add_argument('--head-depth', default=0, type=int, help='')
 
 parser.add_argument('--no-maxpool', default=False, action='store_true', help='')
 parser.add_argument('--use-res4', default=False, action='store_true', help='')
+
+parser.add_argument('--long-mem', default=[0], type=int, nargs='+', help='')
 
 args = parser.parse_args()
 params = {k: v for k, v in args._get_kwargs()}
@@ -220,10 +221,10 @@ def softmax_base(A):
     return A
 
 def hard_prop(predlbls):
-    pred_max = predlbls.max(axis=0)[0]
-    predlbls[predlbls <  pred_max] = 0
-    predlbls[predlbls >= pred_max] = 1
-    predlbls /= predlbls.sum(0)[None]
+    # pred_max = predlbls.max(axis=0)[0]
+    # predlbls[predlbls <  pred_max] = 0
+    # predlbls[predlbls >= pred_max] = 1
+    # predlbls /= predlbls.sum(0)[None]
     return predlbls
     # import pdb; pdb.set_trace()
 
@@ -239,9 +240,6 @@ def test(val_loader, model, epoch, use_cuda):
 
     n_context = params['videoLen']
     topk_vis = args.topk_vis
-
-
-
     t_vid = 0
 
     for batch_idx, (imgs_total, imgs_orig, lbl_set, lbls_tensor, lbls_onehot, lbls_resize, meta) in enumerate(val_loader):
@@ -318,12 +316,29 @@ def test(val_loader, model, epoch, use_cuda):
         im_num = total_frame_num - n_context
         t03 = time.time()
 
-        indices = torch.cat([torch.zeros(im_num, 1).long(),
-            (torch.arange(n_context)[None].repeat(im_num, 1) + 
-                torch.arange(im_num)[:, None])[:, 1:]], dim=-1)
+        def make_bank():
+            ll = []
+            
+            for t in args.long_mem:
+                idx = torch.zeros(im_num, 1).long()
+                if t > 0:
+                    assert t < im_num
+                    idx += t + (args.videoLen+1)
+                    idx[:args.videoLen+t+1] = 0
 
+                ll.append(idx)
+                # idx[:]
+
+
+            ss = [(torch.arange(n_context)[None].repeat(im_num, 1) + 
+                    torch.arange(im_num)[:, None])[:, 1:]
+            ]
+
+            return ll + ss
+                
+        indices = torch.cat(make_bank(), dim=-1)
         feats = feats.cpu()
-        
+
         if isinstance(lbl_set, list):
             lbl_set = torch.cat(lbl_set)[None]
         lbls_resize[0, n_context*2 - 1:] *= 0
@@ -332,6 +347,8 @@ def test(val_loader, model, epoch, use_cuda):
         lbls_resize = lbls_resize.transpose(-1,-3).transpose(-1,-2)
 
         As, Ws, Is = [], [], []
+        Al, Wl, Il = [], [], []
+
         keys, query = feats[:, :, indices], feats[:, :, n_context:]
 
         _, C, N, T, H, W = keys.shape
@@ -339,31 +356,85 @@ def test(val_loader, model, epoch, use_cuda):
         keys = keys.permute(0, 2, 3, 1, 4, 5)        # reshape to 1 x N x T X C X H X W
         query = query.permute(0, 2, 1, 3, 4).unsqueeze(2).expand_as(keys)
 
+        ###########################
+        # import pdb; pdb.set_trace()
+
+        ## For long term mem (no radius)
+        restrict = utils.RestrictAttention(args.radius, flat=False)
+        H, W = query.shape[-2:]
+        D = restrict.mask(H, W)[None].cuda()
+        D[D==0] = -1e10
+        D[D==1] = 0
+
+    
+        ###########################
+
         q_dim = 2 if args.all_nn else 3
         bsize = 2
 
-        for b in range(0, keys.shape[1], bsize):
-            _k, _q = keys[:, b:b+bsize].cuda(), query[:, b:b+bsize].cuda()
+        ###########################
+
+        
+        def restricted(k, q):
+            _, N, T, C, H, W = k.shape
 
             A = spatial_correlation_sample(
-                    _q.view(_q.shape[1]*T, C, H, W),
-                    _k.view(_k.shape[1]*T, C, H, W),
+                    k.view(k.shape[1]*T, C, H, W),
+                    q.view(q.shape[1]*T, C, H, W),
                     patch_size=int(2*args.radius+1))
 
-            A =  A.view(1, _q.shape[1], T, *A.shape[-4:]) 
-            A /= args.temperature
+            A = A.view(1, _q.shape[1], T, *A.shape[-4:]) /args.temperature
             # A[A==0] = -1e20  # ignored idxs in softmax
 
             _, N, T, H1, W1, H, W = A.shape
-            A1 = A.view(N, T*H1*W1, H, W)
-            weights, ids = torch.topk(A1, topk_vis, dim=-3)
+            A = A.view(N, T*H1*W1, H, W)
+            weights, ids = torch.topk(A, topk_vis, dim=-3)
             weights = torch.nn.functional.softmax(weights, dim=-3)
 
+            return A, weights, ids
+
+        def full(k, q):
+            A2 = torch.einsum('ikljmn,ikjop->iklmnop', k, q) / args.temperature
+            _, N, T, H1, W1, H, W = A2.shape
+            A2 = A2.view(N, T*H1*W1, H, W)
+            weights2, ids2 = torch.topk(A2, topk_vis, dim=-3)
+            weights2 = torch.nn.functional.softmax(weights2, dim=-3)
+
+            return A2, weights2, ids2
+
+        ###########################
+
+        for b in range(0, keys.shape[1], bsize):
+            _k, _q = keys[:, b:b+bsize], query[:, b:b+bsize, len(args.long_mem):].cuda()
+
+            k_l = _k[:, :, :len(args.long_mem)].cuda()
+            k_s = _k[:, :, len(args.long_mem):].cuda()
+
+
+            A1, w1, i1 = restricted(k_s, _q)
+            A2, w2, i2 = full(k_l, _q[:, :, 0])
+
+            A12 = torch.cat([
+                torch.gather(A1, 1, i1),
+                torch.gather(A2, 1, i2),
+            ], dim=1)
+            weights, ids = torch.topk(A12, topk_vis, dim=-3)
+
+
+
+            import pdb; pdb.set_trace()
+            
+            Ws += [w  for w  in w1.cpu()]
+            Is += [ii for ii in i1.cpu()]
+
+            Wl += [w  for w  in w2.cpu()]
+            Il += [ii for ii in i2.cpu()]
+
+
             # As += [a for a in A.cpu()[0]]
-            Ws += [w for w in weights.cpu()]
-            Is += [ii for ii in ids.cpu()]
 
         # As, Ws, Is = (torch.cat(_, dim=1) for _ in (As, Ws, Is))
+
 
         t04 = time.time()
         print(t04-t03, 'computed affinities', torch.cuda.max_memory_allocated()/(1024**2))
@@ -390,13 +461,18 @@ def test(val_loader, model, epoch, use_cuda):
             lbls_base = lbls_resize[indices[it]].cuda()
             t06 = time.time()
 
-            # indexing based
-            flat_lbls = lbls_base.transpose(0, 1).flatten(1)
+            lamda = (len(args.long_mem) / (args.videoLen + len(args.long_mem)))
 
+            # Short term (indexing based)
+            flat_lbls = lbls_base.transpose(0, 1).flatten(1)
             global_idxs = torch.gather(lbls_idx, 1, idxs[None])
             nn_lbls = flat_lbls[:, global_idxs.view(topk_vis, -1).t()].transpose(-1,-2)
-
             predlbls = (nn_lbls.view(L, topk_vis, H, W) * weights[None]).sum(1)
+
+            # Long term
+            predlbls = lamda * (flat_lbls[:, Il[it]] * Wl[it].cuda()[None]).sum(1)  + (1-lamda) * predlbls
+
+            # predlbls /= 2
 
             # hard prop
             # predlbls = hard_prop(predlbls)
