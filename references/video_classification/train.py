@@ -36,17 +36,146 @@ def nn_visualize(model, data_loader, device, vis=None):
         video = video.to(device)
         f, m = model(video, orig=orig, just_feats=True)
 
-        feats = torch.nn.functional.normalize(m.sum(-1).sum(-1).transpose(-1, -2).contiguous().view(-1, m.shape[1]), dim=-1, p=2).detach().cpu()
-        f1.append(feats)
-        X1.append(video.view(-1, *video.shape[2:]).detach().cpu())
-        
-        if len(f1) > 50:
-            break
+        if True:
+            vid = video.view(*video.shape[:2], video.shape[2]//3, 3, *video.shape[-2:])
+            vid = vid.flatten(0, -4)
+            ff = f.permute(0, 2,3,1).flatten(0, -2)
+            X1.append(vid.detach().cpu())            
+            f1.append(ff.detach().cpu())
+            # import pdb; pdb.set_trace()
 
+        else:
+            feats = torch.nn.functional.normalize(m.sum(-1).sum(-1).transpose(-1, -2).contiguous().view(-1, m.shape[1]), dim=-1, p=2).detach().cpu()
+    
+            f1.append(feats)
+            X1.append(video.view(-1, *video.shape[2:]).detach().cpu())
+            
+        if len(f1) > 250:
+            break
+        
     utils.nn_pca(torch.cat(f1), torch.cat(X1), name='timecycle-nn')
     import pdb; pdb.set_trace()
-        
+
 def visualize(model, data_loader, device, vis=None):
+    import torch.nn.functional as F
+    import time
+
+    from sklearn.feature_extraction import image
+    from sklearn.cluster import spectral_clustering
+    from sklearn.cluster import KMeans
+
+    M = [] # list of tuples of diffusion videos
+    model_module = model if not hasattr(model, 'module') else model.module
+
+    import wandb
+    import cv2
+    import matplotlib.pyplot as plt
+
+    vis.vis.close()
+
+    # wandb.init(project='palindromes', group='ncuts')
+
+    with torch.no_grad():
+
+        for i, (video, orig) in enumerate(data_loader):
+            start_time = time.time()
+
+            video = video.to(device)
+            # video -= video.min(); video /= video.max()
+            # [vis.vis.images(v, env='viz_kinetics') for v in video]
+
+            feats, maps = model(video, orig=orig, just_feats=True)
+            H = W = maps.shape[-1]
+            N = feats.shape[-1]
+            T = feats.shape[-2]
+
+            video = video[0].detach().cpu().numpy()
+            video -= video.min(); video /= video.max()
+
+            feats = feats[0].flatten(-2)
+
+            def do(S, prefix='', mode='ncuts'):
+                for nc in [8, 16, 24]:
+                    if mode == 'ncuts':
+                        labels = spectral_clustering(S, n_clusters=nc, eigen_solver='arpack')
+                    elif mode == 'kmeans':
+                        labels = KMeans(n_clusters=nc, random_state=0).fit_predict(S)
+                    else:
+                        assert False, 'invalid cluster mode'
+
+                    labels = labels.reshape(T, H, W)            
+                    
+                    labels = torch.nn.functional.interpolate(
+                        torch.from_numpy(labels)[:, None].float(),
+                        mode='bilinear',
+                        size=video.shape[-2:]).round().int()[:, 0]
+                    labels = plt.cm.Paired(labels)[..., :3].transpose(0, -1, 1, 2)
+
+                    vis.vis.images(video*0.5 + labels * 0.5,
+                        opts=dict(title="%s_%s" %(prefix, nc)))
+
+
+            # 1
+            S = torch.matmul(feats.t(), feats).detach().cpu().numpy()
+            feats = feats.detach().cpu().numpy()
+            
+            S1 = np.exp(S/ 0.1)
+            S1 /= S1.max()
+
+            S2 = np.exp(S/ 0.2)
+            S2 /= S2.max()
+
+            S3 = torch.nn.functional.softmax(torch.from_numpy(S) / 0.1, dim=-1).numpy()
+            S4 = torch.nn.functional.softmax(torch.from_numpy(S) / 0.05, dim=-1).numpy()
+            S5 = torch.nn.functional.softmax(torch.from_numpy(S) / 0.15, dim=-1).numpy()
+
+            # S3 = S.copy()
+            # for t in range(T):
+            #     S3[:, t*N:(t+1)*N] *= 0
+            
+            # do(np.clip(S, 0, 1), 'plain')
+            # do(S1, 'temp 0.1')
+            # do(S2, 'temp 0.2')
+            do(S3, 'softmax, temp 0.1')
+            do(S4, 'softmax, temp 0.05')
+            # do(S5, 'softmax, temp 0.15')
+            # do(feats.T, 'kmeans', 'kmeans')
+            # do(S3 @ S3.transpose())            
+            # do(S3.transpose() @ S3)            
+
+
+
+            vis.vis.text('', opts=dict(width=10000, height=10))
+            # import pdb; pdb.set_trace()
+
+            # softmax_temp = model_module.temperature
+            # for j, ff in enumerate(feats):
+
+            #     ff = feats[j].transpose(0,1)    # C x T -> T x C
+            #     xx = video[j:j+1, :, :]
+            #     oo = orig[j:j+1]
+                
+            #     A_traj = model_module.compute_affinity(ff[:-1] , ff[1:], do_dropout=False)
+
+            #     # A_t = [F.softmax(A_traj[0]/softmax_temp, dim=-1)]
+
+            #     N = A_traj[0].shape[-1]
+            #     H = int(N**0.5)
+            #     A_t, source = [torch.zeros(A_traj[0].shape).cuda()], N // 2
+            #     A_t[0][source, source] = 1
+
+            #     for A_tp1 in A_traj[:]:
+            #         A_t.append(F.softmax(A_tp1/softmax_temp, dim=-1) @ A_t[-1])
+
+            #     A_t = torch.stack(A_t)
+
+            #     import pdb; pdb.set_trace()
+
+            # if (i+1) % 4 == 0:
+            #     # import pdb; pdb.set_trace()
+            #     input('#### %s #### %s' % (i, 'Next visualizations?'))
+             
+def visualize2(model, data_loader, device, vis=None):
     import torch.nn.functional as F
     import time
 
@@ -262,7 +391,7 @@ def main(args):
                 utils.save_on_master((dataset, traindir), cache_path)
         
         if hasattr(dataset, 'video_clips'):
-            dataset.video_clips.compute_clips(args.clip_len, 1, frame_rate=8)
+            dataset.video_clips.compute_clips(args.clip_len, 1, frame_rate=args.frame_skip)
 
         return dataset
         
@@ -290,7 +419,7 @@ def main(args):
 
     # 64px
     data_loader_64 = torch.utils.data.DataLoader(
-        dataset, batch_size=args.batch_size, shuffle=not args.fast_test,
+        dataset, batch_size=args.batch_size, # shuffle=not args.fast_test,
         sampler=train_sampler, num_workers=args.workers//2,
         pin_memory=True, collate_fn=collate_fn)
 
@@ -371,7 +500,8 @@ def main(args):
     ########################### 
 
     if args.visualize:
-        visualize(model, data_loader, device, vis=vis)
+        nn_visualize(model, data_loader, device, vis=vis)
+        # visualize(model, data_loader, device, vis=vis)
         return
 
     if args.test_only:
@@ -487,7 +617,7 @@ def parse_args():
     parser.add_argument('--frame-aug', default='', type=str,
         help='(randpatch | grid) + cj ^ flip')
 
-    parser.add_argument('--frame-skip', default=1, type=int, help='number of frames to skip when sampling')
+    parser.add_argument('--frame-skip', default=8, type=int, help='number of frames to skip when sampling')
 
     parser.add_argument('--img-size', default=256, type=int, help='number of patches sampled')
     parser.add_argument('--patch-size', default=[64, 64, 3], type=int, nargs="+", help='number of patches sampled')

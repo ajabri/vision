@@ -17,7 +17,6 @@ import torchvision.transforms as transforms
 import scipy.io as sio
 import scipy.misc
 import cv2
-from PIL import Image
 
 # get the video frames
 # two patches in the future frame, one is center, the other is one of the 8 patches around
@@ -95,13 +94,13 @@ def make_lbl_set(lbls):
     
     flat_lbls_0 = lbls[0].copy().reshape(-1, lbls.shape[-1]).astype(np.uint8)
     lbl_set = np.unique(flat_lbls_0, axis=0)
-
-    # print(lbl_set)
-    # if (lbl_set > 20).sum() > 0:
-    #     import pdb; pdb.set_trace()
-    # count_lbls = [np.all(flat_lbls_0 == ll, axis=-1).sum() for ll in lbl_set]
+    count_lbls = [np.all(flat_lbls_0 == ll, axis=-1).sum() for ll in lbl_set]
     
     print('lbls', time.time() - t00)
+    
+    # only keep labels that appear ten times?!
+    lbl_set_temp = [ll for ii, ll in enumerate(lbl_set) if count_lbls[ii] > 10]
+    lbl_set = lbl_set_temp
 
     return lbl_set
 
@@ -116,40 +115,24 @@ def texturize(onehot):
     hidxs = []
     for h in range(onehot.shape[0]):
         # appears = any(np.all(onehot[h] == lbl_set[object_id], axis=-1))
-        appears = np.any(onehot[h, :, 1:] == 1)
+        appears = any(onehot[h, :, -1] == 1)
         if appears:    
             hidxs.append(h)
 
-    nstripes = min(10, len(hidxs))
+    nstripes = min(6, len(hidxs))
 
-    out = np.zeros((*onehot.shape[:2], nstripes+1))
+    out = np.zeros((*onehot.shape[:2], 8+1))
     out[:, :, 0] = 1
 
     for i, h in enumerate(hidxs):
         cidx = int(i // (len(hidxs) / nstripes))
-        w = np.any(onehot[h, :, 1:] == 1, axis=-1)
+        w = onehot[h, :, -1] == 1
         out[h][w] = 0
         out[h][w, cidx+1] = 1
         # print(i, h, cidx)
 
-#    import pdb; pdb.set_trace()
-
     return out
 
-def hard_prop(predlbls, axis=-1):
-    pred_max = predlbls.max(axis=axis)[..., None]
-    predlbls[predlbls <  pred_max] = 0
-    predlbls[predlbls >= pred_max] = 1
-    predlbls /= predlbls.sum(axis)[..., None]
-    return predlbls
-
-# def resize_labels(lbl, w, h):
-
-# lbl_r  = cv2.resize(lbl, (w, h), cv2.INTER_LINEAR)
-# maxx = lbl_r.max()
-# if maxx <= 1.1:
-
-#     lblimg = (((lblimg2 + 1) / 128).round() * 128).astype(lblimg.dtype)
 
 ######################################################################
 from matplotlib import cm
@@ -161,6 +144,8 @@ class DavisSet(data.Dataset):
         self.imgSize = params['imgSize']
         self.videoLen = params['videoLen']
         self.mapScale = params['mapScale']
+
+        self.mapRatio = params['mapRatio']
 
         self.texture = params['texture']
         self.round = params['round']
@@ -186,28 +171,6 @@ class DavisSet(data.Dataset):
         else:
             return None
     
-
-    def make_paths(self, folder_path, label_path):
-        I, L = os.listdir(folder_path), os.listdir(label_path)
-        L = [ll for ll in L if 'npy' not in ll]
-
-        frame_num = len(I) + self.videoLen
-        I.sort(key=lambda x:int(x.split('.')[0]))
-        L.sort(key=lambda x:int(x.split('.')[0]))
-
-        I_out, L_out = [], []
-
-        for i in range(frame_num):
-            i = max(0, i - self.videoLen)
-            img_path = "%s/%s" % (folder_path, I[i])
-            lbl_path = "%s/%s" % (label_path,  L[i])
-
-            I_out.append(img_path)
-            L_out.append(lbl_path)
-
-        return I_out, L_out
-
-
     def __getitem__(self, index):
 
         folder_path = self.jpgfiles[index]
@@ -224,7 +187,10 @@ class DavisSet(data.Dataset):
 
         #mean, std = (0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010)
         mean, std = [0.485, 0.456, 0.406], [0.229, 0.224, 0.225]
-        img_paths, lbl_paths = self.make_paths(folder_path, label_path)
+
+        
+        lbl_paths = []
+        img_paths = []
 
         t000 = time.time()
 
@@ -232,40 +198,44 @@ class DavisSet(data.Dataset):
         for i in range(frame_num):
             t00 = time.time()
 
-            img_path, lbl_path = img_paths[i], lbl_paths[i]
+            if i < self.videoLen:
+                img_path = folder_path + "/{:05d}.jpg".format(0)
+                lbl_path = label_path + "/{:05d}.png".format(0)
+            else:
+                img_path = folder_path + "/{:05d}.jpg".format(i - self.videoLen)
+                lbl_path = label_path + "/{:05d}.png".format(i - self.videoLen)
             
             img = load_image(img_path)  # CxHxW
-
-            # if 'davis' in lbl_path:
-            #     lblimg = Image.open(lbl_path)
-            #     lblimg = np.array(lblimg, dtype=np.int32)[..., None]
-            # else:
-            lblimg = cv2.imread(lbl_path)
+            lblimg  = cv2.imread(lbl_path)
 
             # print('loaded', i, time.time() - t00)
 
             ht, wd = img.size(1), img.size(2)
-            if self.imgSize > 0:
+            if self.imgSize > 0 or (self.imgSize == -1 and self.mapRatio != 1):
                 newh, neww = ht, wd
 
-                if ht <= wd:
-                    ratio  = 1.0 #float(wd) / float(ht)
-                    # width, height
-                    img = resize(img, int(self.imgSize * ratio), self.imgSize)
+                ratio = self.mapRatio
+                if ratio == 1:
                     newh = self.imgSize
-                    neww = int(self.imgSize * ratio)
-                else:
-                    ratio  = 1.0 #float(ht) / float(wd)
-                    # width, height
-                    img = resize(img, self.imgSize, int(self.imgSize * ratio))
-                    newh = int(self.imgSize * ratio)
                     neww = self.imgSize
+                else:
+                    ratio = float(wd) / float(ht)
+                    if self.imgSize < 0:
+                        imgSize = newh
+                    else:
+                        imgSize = self.imgSize
+
+                    newh, neww = imgSize, int(imgSize * ratio)
+                    newh, neww = ((np.array([newh, neww]) / 8).round() * 8).astype(np.int).tolist()                    
+                    # import pdb; pdb.set_trace()
+
+                img = resize(img, neww, newh)
+                lblimg2  = cv2.resize(lblimg, (neww, newh), cv2.INTER_NEAREST)                
 
                 if self.round:
-                    lblimg2  = cv2.resize(lblimg, (newh, neww), cv2.INTER_LINEAR)
-                    lblimg = (((lblimg2 + 0) / 128).round() * 128).astype(lblimg.dtype)
+                    lblimg = ((lblimg2 / 128).round() * 128).astype(lblimg.dtype)
                 else:
-                    lblimg = cv2.resize(lblimg, (newh, neww), cv2.INTER_NEAREST)
+                    lblimg = lblimg2
 
             img_orig = img.clone()
             img = color_normalize(img, mean, std)
@@ -274,30 +244,27 @@ class DavisSet(data.Dataset):
             imgs.append(img)
             lbls.append(lblimg.copy())
             
+            img_paths.append(img_path)
+            lbl_paths.append(lbl_path)
+
         # Meta info
         meta = dict(folder_path=folder_path, img_paths=img_paths, lbl_paths=lbl_paths)
 
+
         ########################################################
         # Prepare reshaped label information
+
         lbls = np.stack(lbls)
         prefix = '/' + '/'.join(lbl_paths[0].split('.')[:-1])
 
         # Get lblset
         lblset_path = "%s_%s.npy" % (prefix, 'lblset')
         lblset = make_lbl_set(lbls)
-
-        if np.all((lblset[1:] - lblset[:-1]) == 1):
-            lblset = lblset[:, 0:1]
-
-        # import pdb; pdb.set_trace()
         # lblset = try_np_load(lblset_path)
         # if lblset is None or True:
         #     print('making label set', lblset_path)
         #     lblset = make_lbl_set(lbls)
         #     np.save(lblset_path, lblset)
-
-        # if len(lblset) != 20 or np.array(lblset).max() >= 20:
-        #     import pdb; pdb.set_trace()
 
         onehots = []
         resizes = []
@@ -319,24 +286,18 @@ class DavisSet(data.Dataset):
             resized = try_np_load(rz_path)
             if resized is None or True:
                 print('computing resized lbl for', rz_path)
-                resized = cv2.resize(np.float32(onehot), (rsz_w, rsz_h), cv2.INTER_LINEAR)
-                # import pdb; pdb.set_trace()
-                
-                # NOTE give boost for color model_5, mainly for J score
-                # resized[:,:,0] -= 0.0001
-                # resized = hard_prop(resized)
-
-                # resized = np.round(resized)
-                # import pdb; pdb.set_trace()
+                resized = cv2.resize(np.float32(onehot), (rsz_w, rsz_h), cv2.INTER_NEAREST)
                 # resized = onehot[::self.mapScale[0], ::self.mapScale[1]] * 1.0
-
+                # import pdb; pdb.set_trace()
                 np.save(rz_path, resized)
 
             if self.texture:
                 texturized = texturize(resized)
                 resizes.append(texturized)
-                lblset = np.array([[0, 0, 0]] + [cm.Paired(i)[:3] for i in range(texturized.shape[-1])]) * 255.0
-                break
+                lblset = np.array([[0, 0, 0]] + [cm.Paired(i)[:3] for i in range(texturized.shape[-1])]) *255.0
+                # import pdb; pdb.set_trace()
+
+                # break
             else:
                 resizes.append(resized)
                 onehots.append(onehot)
@@ -346,9 +307,9 @@ class DavisSet(data.Dataset):
             # print('frame', i, time.time() - t00)
 
         if self.texture:
-            resizes = resizes * self.videoLen
-            for _ in range(len(lbl_paths)-self.videoLen):
-                resizes.append(np.zeros(resizes[0].shape))
+            # resizes = resizes * self.videoLen
+            # for _ in range(len(lbl_paths)-self.videoLen):
+            #     resizes.append(np.zeros(resizes[0].shape))
             onehots = resizes
 
         ########################################################

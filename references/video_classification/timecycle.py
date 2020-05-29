@@ -328,7 +328,7 @@ class TimeCycle(nn.Module):
 
         # import pdb; pdb.set_trace()
 
-    def forward(self, x, orig=None, just_feats=False, visualize=False):
+    def forward(self, x, orig=None, just_feats=False, visualize=False, targets=None):
         # x = x.cpu() * 0 + torch.randn(x.shape)
         # x = x.cuda()
         # orig = orig.cpu() * 0 + torch.randn(orig.shape)
@@ -379,7 +379,10 @@ class TimeCycle(nn.Module):
         # _ff = ff.view(*ff.shape[:-1], h, w)
         if just_feats:
             h, w = int(np.ceil(x.shape[-2] / self.map_scale)), int(np.ceil(x.shape[-1] / self.map_scale))
-            return ff, ff.view(*ff.shape[:-1], h, w)
+            if _N > 1:
+                return ff, mm
+            else:
+                return ff, ff.view(*ff.shape[:-1], h, w)
 
         B, C, T, N = ff.shape
 
@@ -399,7 +402,7 @@ class TimeCycle(nn.Module):
         # PatchGraph
         #################################################################
         
-        if np.random.random() < 0.05 or visualize:
+        if visualize: #np.random.random() < 0.05 and visualize:
             with torch.no_grad():
 
                 if ff.device.index == 0:
@@ -454,7 +457,7 @@ class TimeCycle(nn.Module):
                     A21s.append(A2)
                     AAs.append(AA)
 
-                if np.random.random() < (0.05 / len(t_pairs)) or visualize:
+                if np.random.random() < (0.05 / len(t_pairs)) or visualize: # and False:
                     self.viz.text('%s %s' % (t1, t2), opts=dict(height=1, width=10000), win='div')
                     with torch.no_grad():
                         self.visualize_frame_pair(x, ff, mm, t1, t2)
@@ -483,7 +486,9 @@ class TimeCycle(nn.Module):
                         # import pdb; pdb.set_trace()
 
                     xent_loss, acc = self.compute_xent_loss(aa, log_aa, weight=xent_weight)
-                    kldv_loss = self.compute_kldv_loss(aa, log_aa)
+                    kldv_loss = self.compute_kldv_loss(aa, log_aa, targets=targets)
+                    if targets:
+                        xent_loss*=0
 
                     xents.append(xent_loss)
                     kldvs.append(kldv_loss)
@@ -491,8 +496,11 @@ class TimeCycle(nn.Module):
                     diags['acc cyc %s' % str(i)] = acc
                     diags['xent cyc %s' % str(i)] = xent_loss.mean().detach()
 
+                    if targets:
+                        diags['kl cyc %s' % str(i)] = xent_loss.mean().detach()
+
             
-        if _N > 1 and (np.random.random() < (0.01 / len(t_pairs)) or visualize):
+        if _N > 1 and (np.random.random() < (0.01 / len(t_pairs)) or visualize): # and False:
             # all patches
             all_x = x.permute(0, 3, 1, 2, 4, 5)
             all_x = all_x.reshape(-1, *all_x.shape[-3:])
@@ -536,9 +544,9 @@ class TimeCycle(nn.Module):
 
         return self._xent_targets[key]
 
-    def compute_xent_loss(self, A, log_AA, weight=None):
+    def compute_xent_loss(self, A, log_AA, weight=None, targets=None):
         # Cross Entropy
-        targets = self.xent_targets(A)
+        targets = targets or self.xent_targets(A)
 
         if self.xent_coef > 0:
             _xent_loss = self.xent(log_AA, targets)
@@ -551,9 +559,9 @@ class TimeCycle(nn.Module):
         else:
             return 0, 0
 
-    def compute_kldv_loss(self, A, log_AA):
+    def compute_kldv_loss(self, A, log_AA, targets=None):
         # KL Div with Smoothed 2D Targets
-        targets = self.kldv_targets(A)
+        targets = targets or self.kldv_targets(A)
         if self.kldv_coef > 0:
             kldv_loss = self.kldv(log_AA, targets)
             # print(kldv_loss, log_AA.min(), AA.min(), A.min())

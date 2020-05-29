@@ -10,14 +10,13 @@ def test(model, L=5, K=2, T=0.01, opts=[], gpu=0, force=False):
     # MODEL="--resume ${MODEL}"
     # model="--model-type imagenet"
 
-    if os.path.exists(model):
+    if os.path.exists(model) and 'vince_weights' not in model:
         model_str = "--model-type scratch --resume %s" % model
         model_name = '_'.join(model.split('/')[1:]) #.replace('/', '_')
     else:
         model_str = '--model-type %s' % model
         model_name = model
         # import pdb; pdb.set_trace()
-
 
     hostname = socket.gethostname()
 
@@ -37,14 +36,20 @@ def test(model, L=5, K=2, T=0.01, opts=[], gpu=0, force=False):
         davis2017path = '/data/yusun/ajabri/davis-2017/'
 
     # model_name = "hardprop_fixedtemp_truerenorm_all_L%s_K%s_T%s_opts%s_M%s" %(L, K, T, ''.join(opts), model_name) 
-    model_name = "L%s_K%s_T%s_opts%s_M%s" %(L, K, T, ''.join(opts), model_name) 
+    model_name = "IN_L%s_K%s_T%s_opts%s_M%s" %(L, K, T, ''.join(opts), model_name) 
 
     if 'nopool' in model_name:
         opts += ['--no-maxpool']
-    if 'res4' in model_name:
-        opts += ['--use-res4']
 
+    # if 'res4' in model_name or '425-noxw' in model_name: # or 'vince' in model_name:
+    #     # if not 'res4-nocj-noblur' in model_name: # or True:
+    #         opts += ['--use-res4']
+    
     opts = ' '.join(opts)
+
+    if '--cropSize -1' in opts:
+        opts += ' --mapRatio -1 '
+        
     cmd = ""
 
     outfile = f"{outdir}/converted_{model_name}/results.yaml"
@@ -78,14 +83,14 @@ def sweep(models, L, K, T, size, multiprocess=False, slurm=False, force=False, g
     import itertools
 
     # opts = [['--head-depth', str(-1)]] #['--radius', str(10)], ['--radius', str(5)], ['--radius', str(2.5)]] #, ['--all-nn']]
-    base_opts = ['--cropSize', str(size), '--head-depth', str(-1), '--all-nn',
+    base_opts = ['--cropSize', str(size), '--head-depth', str(-1), '--all-nn', # '--norm_mask'
     #   '--no-maxpool',
     #   '--use-res4'
       ]
 
     # opts = [base_opts + ['--radius', str(10)], base_opts + ['--radius', str(40)], base_opts + ['--radius', str(5)]]
-    # opts = [base_opts + ['--radius', str(10), '--long-mem','0', '5', '10', '15']] #, base_opts + ['--radius', str(5)]]
-    opts = [base_opts + ['--radius', str(10), '--long-mem','0']] #, base_opts + ['--radius', str(5)]]
+    # opts = [base_opts + ['--radius', str(10), '--long-mem','0', '5', '10']] #, base_opts + ['--radius', str(5)]]
+    opts = [base_opts + ['--radius', str(12), '--long-mem','0']] #, base_opts + ['--radius', str(5)]]
     # opts = [base_opts + ['--radius', str(10)]] #, base_opts + ['--radius', str(5)]]
 
     prod = list(itertools.product(models, L, K, T, opts))

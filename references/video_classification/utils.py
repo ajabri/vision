@@ -370,11 +370,11 @@ import skimage
 
 import utils
 
-def partial_load(pretrained_dict, model):
+def partial_load(pretrained_dict, model, skip_keys=[]):
     model_dict = model.state_dict()
 
     # 1. filter out unnecessary keys
-    filtered_dict = {k: v for k, v in pretrained_dict.items() if k in model_dict}
+    filtered_dict = {k: v for k, v in pretrained_dict.items() if k in model_dict and not any([sk in k for sk in skip_keys])}
     skipped_keys = [k for k in pretrained_dict if k not in filtered_dict]
     print('Skipped keys: ',  skipped_keys)
 
@@ -786,10 +786,10 @@ def get_frame_aug(args):
     train_transform = []
 
     if 'cj' in args.frame_aug:
-        _cj = 0.2
+        _cj = 0.1
         train_transform += [
-            transforms.RandomGrayscale(p=0.2),
-            transforms.ColorJitter(_cj, _cj, _cj, _cj),
+            #transforms.RandomGrayscale(p=0.2),
+            transforms.ColorJitter(_cj, _cj, _cj, 0),
         ]
 
     if 'flip' in args.frame_aug:
@@ -848,10 +848,10 @@ def get_frame_transform(args):
         tt.append(norm_size)
 
     if 'cj' in fts:
-        _cj = 0.2
+        _cj = 0.1
         tt += [
-            transforms.RandomGrayscale(p=0.2),
-            transforms.ColorJitter(_cj, _cj, _cj, _cj),
+            #transforms.RandomGrayscale(p=0.2),
+            transforms.ColorJitter(_cj, _cj, _cj, 0),
         ]
 
     if 'flip' in fts:
@@ -882,10 +882,14 @@ def get_frame_transform(args):
     ])
 
     def with_orig(x):
+        patchify = (not args.visualize)  or True
+        
         if 'numpy' in str(type(x[0])):
-            x = frame_transform_train(x) if not args.visualize else T.PerTimestepTransform(plain1)(x), plain(x[0])
+            x = frame_transform_train(x) if patchify \
+                    else T.PerTimestepTransform(plain1)(x), plain(x[0])
         else:
-            x = frame_transform_train(x) if not args.visualize else T.PerTimestepTransform(plain1)(x), plain(x[0].permute(2, 0, 1))
+            x = frame_transform_train(x) if patchify \
+                    else T.PerTimestepTransform(plain1)(x), plain(x[0].permute(2, 0, 1))
 
         return x
 
@@ -1124,6 +1128,12 @@ class From3D(nn.Module):
 
         return mm.view(N, T, *mm.shape[-3:]).permute(0, 2, 1, 3, 4)
 
+
+def load_vince_model(path):
+    checkpoint = torch.load(path, map_location={'cuda:0': 'cpu'})
+    checkpoint = {k.replace('feature_extractor.module.model.', ''): checkpoint[k] for k in checkpoint if 'feature_extractor' in k}
+    return checkpoint
+
 def make_encoder(args):
     import resnet3d
     import resnet2d
@@ -1143,6 +1153,12 @@ def make_encoder(args):
 
         if args.no_maxpool:
             resnet.maxpool = None
+    elif 'vince_weights' in model_type:
+        checkpoint = load_vince_model(model_type)
+        resnet2d._REFLECT_PAD = False
+        resnet = resnet2d.resnet18(pretrained=False)
+        resnet.load_state_dict(checkpoint)
+        # import pdb; pdb.set_trace()
 
     elif model_type == 'aaresnet':
         resnet = aa_resnet.resnet18(pretrained=False)
@@ -1349,3 +1365,190 @@ class Colorizer(nn.Module):
         out = (corr * image_uf).sum(2).reshape([b,self.C,h1,w1])
 
         return out
+
+###############################################################################
+
+import networkx as nx
+import random
+from mpl_toolkits.mplot3d import Axes3D
+import matplotlib.pyplot as plt
+import numpy as np
+
+path_color = lambda x: plt.cm.Blues(x**0.8+0.1)
+path_color2 = lambda x: plt.cm.Purples(x**0.8+0.1)
+
+def network_plot_3D(G, A, azim_angle, pos, L, H, W, save=False, figsize=(20, 4), source_sink=(-1, -1)):
+#     # Get node positions
+#     pos = nx.get_node_attributes(G, 'pos')
+    
+    # Get number of nodes
+    n = G.number_of_nodes()
+    # Get the maximum number of edges adjacent to a single node
+    edge_max = max([G.degree(i) for i in range(n)])
+
+    # Define color range proportional to number of edges adjacent to a single node
+#     colors = [np.array(plt.cm.plasma(G.degree(i)/edge_max)) for i in range(n)] 
+    colors = [
+        plt.cm.plasma((np.ceil(L//2) - np.abs(i // (H*W) - np.ceil(L//2))) / 12 - 0.1) \
+        for i in range(n)
+    ] 
+    
+    colors = [
+        path_color(A[:, i].sum() + 0.2 ) \
+        for i in range(n)
+    ]
+    
+#     colors = []
+#     for i in range(n):
+#         path_color(A[:, i].sum())
+
+    
+    def n_to_t(n):
+        return n // (H*W)
+
+    source, sink = source_sink
+
+    if not isinstance(source, list) and not isinstance(source, tuple):
+        source = [source]
+        sink = [sink]
+        
+    if source[0] >= 0:
+        grey = plt.cm.Greys(0.4)
+        for i in range(n):
+            colorer = path_color if  i % (H*W) > (H*W//2) else path_color2
+            if n_to_t(i) == 0:
+
+                if i not in set(source):
+                    #       colors[i] = np.array([0.7, 0.9, 0.7])
+                    colors[i] = grey
+                else:
+                    colors[i] = colorer(0.7)
+
+            elif n_to_t(i) == L-1:
+                if i not in set(sink):
+    #                 continue; #colors[i] = np.array([0.7]*3)
+#                     colors[i] = np.array([187, 77, 59])*1.3 / 255.0
+                    colors[i] = list(plt.cm.Reds(0.95)) 
+#                     print(colors[i][-1])
+                    colors[i] = tuple(colors[i])
+#                     colors[i][3] = 0.3
+
+                else:
+#                     colors[i] = colorer(0.7)
+                    colors[i] = plt.cm.Greens(0.7)
+#                     colors[i] = np.array([20, 200, 128]) / 255.0
+    #                 colors[i] = np.array([232, 185, 35])/255.0
+            else:
+                colors[i] = colorer(A[:, i].sum() + 0.2) if A[:, i].sum() > 0.1 else grey
+                
+            
+    # 3D network plot
+    with plt.style.context(('seaborn-dark-palette')):
+        
+        fig = plt.figure(figsize=figsize)
+        ax = Axes3D(fig, proj_type='persp')
+        
+        print(len(colors), len(pos))
+        
+        # Loop on the pos dictionary to extract the x,y,z coordinates of each node
+        for key, value in enumerate(pos):
+            xi = value[0]
+            yi = value[1]
+            zi = value[2]
+            
+            # Scatter plot
+#             ax.scatter(xi, yi, zi, c=colors[key], s=20+20*G.degree(key), edgecolors='k', alpha=0.7)
+            ax.scatter(xi, yi, zi, c=(np.array(colors[key])/1.5 + 0.3), s=200, edgecolors='k', alpha=1)
+            
+        
+        # Loop on the list of edges to get the x,y,z, coordinates of the connected nodes
+        # Those two points are the extrema of the line to be plotted
+        for i,j in enumerate(G.edges()):
+            x = np.array((pos[j[0]][0], pos[j[1]][0]))
+            y = np.array((pos[j[0]][1], pos[j[1]][1]))
+            z = np.array((pos[j[0]][2], pos[j[1]][2]))
+            
+            colorer = path_color if  j[1] % (H*W) > (H*W//2) else path_color2
+
+        
+        # Plot the connecting lines
+            ax.plot(x, y, z,
+                    c=colorer(G[j[0]][j[1]]['weight'] + 1e-1),
+                    alpha=G[j[0]][j[1]]['weight'] + 0.1, 
+                    linewidth=(G[j[0]][j[1]]['weight']+1)*1.5
+                   )
+#             ax.plot(x, y, z, c='darkgray', alpha=0.8, linewidth=0.5)
+    
+    # Set the initial view
+    ax.view_init(azim_angle[0], azim_angle[1])
+    ax.mouse_init(rotate_btn=1, zoom_btn=3)
+
+    # Hide the axes
+    ax.set_axis_off()
+    
+    if save is not False:
+        plt.savefig('/tmp/spacy.pdf', transparent=True)
+        plt.close('all')
+    else:
+        plt.show()
+        
+
+    return
+
+def make_graph(As):
+    import pdb; pdb.set_trace()
+
+    L, H = len(As) * 2 + 1, int(As.shape[-1]**0.5)
+    W = H
+
+    G = nx.from_numpy_matrix(A)
+
+    pos = [
+        (n % (H*W) % W, n // (H * W), n % (H*W) // W )
+        for n in range(L*H*W)
+    ]
+    network_plot_3D(G, A, (15, 8), pos, L, H, W, save=True, figsize=(24, 5), source_sink=(source, sink))
+
+
+
+def vis_pose(oriImg, points):
+
+    # fig = matplotlib.pyplot.gcf()
+    # fig.set_size_inches(12, 12)
+
+    pa = np.zeros(15)
+    pa[2] = 0
+    pa[12] = 8
+    pa[8] = 4
+    pa[4] = 0
+    pa[11] = 7
+    pa[7] = 3
+    pa[3] = 0
+    pa[0] = 1
+    pa[14] = 10
+    pa[10] = 6
+    pa[6] = 1
+    pa[13] = 9
+    pa[9] = 5
+    pa[5] = 1
+
+    colors = [[255, 0, 0], [255, 85, 0], [255, 170, 0], [255, 255, 0], [170, 255, 0], [85, 255, 0], [0, 255, 0],
+              [0, 255, 85], [0, 255, 170], [0, 255, 255], [0, 170, 255], [0, 85, 255], [0, 0, 255], [85, 0, 255],
+              [170,0,255],[255,0,255]]
+    canvas = oriImg
+    stickwidth = 4
+    x = points[0, :]
+    y = points[1, :]
+
+    for n in range(len(x)):
+        pair_id = int(pa[n])
+
+        x1 = int(x[pair_id])
+        y1 = int(y[pair_id])
+        x2 = int(x[n])
+        y2 = int(y[n])
+
+        if x1 >= 0 and y1 >= 0 and x2 >= 0 and y2 >= 0:
+            cv2.line(canvas, (x1, y1), (x2, y2), colors[n], 8)
+
+    return canvas

@@ -156,11 +156,12 @@ def main():
     start_epoch = 0  # start from epoch 0 or last checkpoint epoch
     
     model = tc.TimeCycle(
-        args
+        args,
+        vis=vis
     ).cuda()
-    model = Wrap(model)
+    # model = Wrap(model)
     
-    params['mapScale'] = model(torch.zeros(1, 10, 3, 320, 320).cuda(), None, True, func='forward')[1].shape[-2:]
+    params['mapScale'] = model(torch.zeros(1, 10, 3, 320, 320).cuda(), just_feats=True)[1].shape[-2:]
     params['mapScale'] = 320 // np.array(params['mapScale'])
 
     val_loader = torch.utils.data.DataLoader(
@@ -177,21 +178,22 @@ def main():
     if os.path.isfile(args.resume):
         print('==> Resuming from checkpoint..')
         checkpoint = torch.load(args.resume)
-        utils.partial_load(checkpoint['model'], model.model, skip_keys=['head'])
+        utils.partial_load(checkpoint['model'], model, skip_keys=['head'])
 
         del checkpoint
     
     model.eval()
-    model = torch.nn.DataParallel(model).cuda()    #     model = model.cuda()
+    # model = torch.nn.DataParallel(model).cuda()    #     model = model.cuda()
+    model = model.cuda()
 
     if not os.path.exists(args.save_path):
         os.makedirs(args.save_path)
     
     print('\Testing')
-    with torch.no_grad():
-        test_loss = test(val_loader, model, 1, use_cuda)
+    # with torch.no_grad():
+    test_loss = test(val_loader, model, 1, use_cuda)
             
-from matplotlib import cm
+
 def dump_predictions(predlbls, lbl_set, img_now, prefix):
     sz = img_now.shape[:-1]
 
@@ -222,14 +224,9 @@ def dump_predictions(predlbls, lbl_set, img_now, prefix):
     # import pdb; pdb.set_trace()
     predlbls_val2 = cv2.resize(predlbls_val, (img_now.shape[1], img_now.shape[0]), interpolation=cv2.INTER_NEAREST)
 
-    # import pdb; pdb.set_trace()
-    if predlbls_val2.ndim < 3:
-        is_bg = predlbls_val2 == 0
-        predlbls_val2 = cm.tab20(predlbls_val2+1)[..., :3] * 255.0
-        predlbls_val2[is_bg] = 0
-
     # activation_heatmap = cv2.applyColorMap(predlbls, cv2.COLORMAP_JET)
     img_with_heatmap =  np.float32(img_now) * 0.5 + np.float32(predlbls_val2) * 0.5
+
     
     # imname  = prefix + '_blend.jpg'
     # imageio.imwrite(imname, np.uint8(img_with_heatmap))
@@ -326,6 +323,8 @@ def test(val_loader, model, epoch, use_cuda):
     D = None
     t_vid = 0
 
+    _model_state = model.state_dict().copy()
+
     for batch_idx, (imgs_total, imgs_orig, lbl_set, lbls_tensor, lbls_onehot, lbls_resize, meta) in enumerate(val_loader):
         t_vid = time.time()
         print('******* Vid %s *******' % batch_idx)
@@ -344,181 +343,205 @@ def test(val_loader, model, epoch, use_cuda):
         ##################################################################
         # Compute image features
         ##################################################################        
+        model.load_state_dict(_model_state)
+        optimizer = torch.optim.SGD(model.parameters(), lr=0.01, momentum=0.9, weight_decay=0)
+
+        def fit(model, video, targets, steps=1):
+            for _ in range(steps):
+                output, xent_loss, kldv_loss, diagnostics = model(video, orig=video, targets=targets)
+                loss = (xent_loss.mean() + kldv_loss.mean())
+
+                optimizer.zero_grad()
+                loss.backward()
+                optimizer.step()
+
+        # make labels: uniform prob to indices with same mask id
+        targets = lbls_onehot.max(-1)[1]
+        targets = (targets[0, 0:1, ..., None, None] == targets[0, 0:1])
+        targets = targets*1.0/ targets.sum(-1).sum(-1)[..., None, None]*1.0
         
-        t00 = time.time()
-        feats = []
-        bsize = 5
-        for b in range(0, imgs_total.shape[1], bsize):
-            node, feat = model.module(imgs_total[:, b:b+bsize], None, True, func='forward')
-            feats.append(feat.cpu())
-        feats = torch.cat(feats, dim=2)
-        
-        # nodes, feats = model.module(imgs_total, None, True, func='forward')
-        feats = feats.squeeze(1)
-        if not args.no_l2:
-            feats = torch.nn.functional.normalize(feats, dim=1)
+        b, bsize = 0, 5
+        # for b in range(0, imgs_total.shape[1], bsize):
+        for iters in range(10):
+            video  = imgs_total[:, b:b+bsize]
+            fit(model, video, targets)
+            import pdb; pdb.set_trace()
 
-        print('computed features', time.time()-t00)
+        with torch.no_grad():
 
-        ##################################################################
-        # Compute correlation features
-        ##################################################################
-        
-        torch.cuda.empty_cache()
-
-        im_num = total_frame_num - n_context
-        t03 = time.time()
-
-        def make_bank():
-            ll = []
+            t00 = time.time()
+            feats = []
+            bsize = 5
+            for b in range(0, imgs_total.shape[1], bsize):
+                node, feat = model(imgs_total[:, b:b+bsize], orig=None, just_feats=True)
+                feats.append(feat.cpu())
+            feats = torch.cat(feats, dim=2)
             
-            for t in args.long_mem:
-                idx = torch.zeros(im_num, 1).long()
-                if t > 0:
-                    assert t < im_num
-                    idx += t + (args.videoLen+1)
-                    idx[:args.videoLen+t+1] = 0
+            # nodes, feats = model.module(imgs_total, None, True, func='forward')
+            feats = feats.squeeze(1)
+            if not args.no_l2:
+                feats = torch.nn.functional.normalize(feats, dim=1)
 
-                ll.append(idx)
+            print('computed features', time.time()-t00)
 
-            ss = [
-                (torch.arange(n_context)[None].repeat(im_num, 1) + 
-                    torch.arange(im_num)[:, None])[:, 1:]
-            ]
-            # import pdb; pdb.set_trace()
+            ##################################################################
+            # Compute correlation features
+            ##################################################################
             
-            return ll + ss
+            torch.cuda.empty_cache()
+
+            im_num = total_frame_num - n_context
+            t03 = time.time()
+
+            def make_bank():
+                ll = []
                 
-        indices = torch.cat(make_bank(), dim=-1)
-        keys, query = feats[:, :, indices], feats[:, :, n_context:]
+                for t in args.long_mem:
+                    idx = torch.zeros(im_num, 1).long()
+                    if t > 0:
+                        assert t < im_num
+                        idx += t + (args.videoLen+1)
+                        idx[:args.videoLen+t+1] = 0
 
-        restrict = utils.RestrictAttention(args.radius, flat=False)
-        D = restrict.mask(*query.shape[-2:])[None]
-        D = D.flatten(-4, -3).flatten(-2)
-        D[D==0] = -1e10; D[D==1] = 0
+                    ll.append(idx)
 
-        Ws, Is = [], []
-        keys, query = keys.flatten(-2), query.flatten(-2)
-
-        bsize, pbsize = 2, 100 #keys.shape[2] // 2
-
-        for b in range(0, keys.shape[2], bsize):
-            _k, _q = keys[:, :, b:b+bsize].cuda(), query[:, :, b:b+bsize].cuda()
-            w_s, i_s = [], []
-
-            for pb in range(0, _k.shape[-1], pbsize):
-                # A = torch.einsum('ijklmn,ijkop->iklmnop', _k, _q) / args.temperature
-                A = torch.einsum('ijklm,ijkn->iklmn',
-                    _k, _q[..., pb:pb+pbsize]) 
-                
-                A[0, :, len(args.long_mem):] += D[..., pb:pb+pbsize].cuda()
-
-                _, N, T, h1w1, hw = A.shape
-                A = A.view(N, T*h1w1, hw)
-                A /= args.temperature
-
-                weights, ids = torch.topk(A, args.topk_vis, dim=-2)
-                weights = torch.nn.functional.softmax(weights, dim=-2)
-                
-                w_s.append(weights.cpu())
-                i_s.append(ids.cpu())
-
-            # import pdb; pdb.set_trace()
-
-            weights = torch.cat(w_s, dim=-1)
-            ids = torch.cat(i_s, dim=-1)
-            Ws += [w for w in weights]
-            Is += [ii for ii in ids]
-
-        # Ws, Is = torch.cat(Ws, 1), torch.cat(Is, 1)         # A = torch.cat(As, dim=1) 
-
-        t04 = time.time()
-        print(t04-t03, 'affinity forward, max mem', torch.cuda.max_memory_allocated() / (1024**2))
-
-        if isinstance(lbl_set, list):
-            lbl_set = torch.cat(lbl_set)[None]
-        lbls_resize[0, n_context*2 - 1:] *= 0
-        lbl_set, lbls_resize = lbl_set[0], lbls_resize[0]
-
-            
-        ##################################################################
-        # Label propagation
-        ##################################################################
-
-
-        maps = []
-        keypts = []
-        images = []
-        for it in range(indices.shape[0]):
-            if it % 10 == 0:
-                print(it)
-
-            lbls_base = lbls_resize[indices[it]].cuda()
-            flat_lbls = lbls_base.flatten(0, 2).transpose(0, 1)
-
-            predlbls = (flat_lbls[:, Is[it]] * Ws[it].cuda()[None]).sum(1)
-            predlbls = predlbls.view(-1, *feats.shape[-2:])
-
-            # print(predlbls.mean(-1).mean(-1))
-            #predlbls = hard_prop(predlbls)
-
-            predlbls = predlbls.permute(1,2,0)
-
-            img_now = imgs_toprint[it + n_context].permute(1,2,0).numpy() * 255
-                        
-            if it > 0:
-                lbls_resize[it + n_context] = predlbls
-            else:
-                predlbls = lbls_resize[0]
-
-            if args.norm_mask:
+                ss = [
+                    (torch.arange(n_context)[None].repeat(im_num, 1) + 
+                        torch.arange(im_num)[:, None])[:, 1:]
+                ]
                 # import pdb; pdb.set_trace()
-                predlbls[:, :, :] -= predlbls.min(-1)[0][:, :, None]
-                predlbls[:, :, :] /= predlbls.max(-1)[0][:, :, None]
+                
+                return ll + ss
+                    
+            indices = torch.cat(make_bank(), dim=-1)
+            keys, query = feats[:, :, indices], feats[:, :, n_context:]
 
-            _maps = []
+            restrict = utils.RestrictAttention(args.radius, flat=False)
+            D = restrict.mask(*query.shape[-2:])[None]
+            D = D.flatten(-4, -3).flatten(-2)
+            D[D==0] = -1e10; D[D==1] = 0
 
-            if 'jhmdb' in args.filelist.lower():
-                coords, predlbls_sharp = process_pose(predlbls, lbl_set)
-                keypts.append(coords)
-                pose_map = utils.vis_pose(np.array(img_now).copy(), coords.numpy() * params['mapScale'][..., None])
-                _maps += [pose_map]
+            Ws, Is = [], []
+            keys, query = keys.flatten(-2), query.flatten(-2)
+
+            bsize, pbsize = 2, 100 #keys.shape[2] // 2
+
+            for b in range(0, keys.shape[2], bsize):
+                _k, _q = keys[:, :, b:b+bsize].cuda(), query[:, :, b:b+bsize].cuda()
+                w_s, i_s = [], []
+
+                for pb in range(0, _k.shape[-1], pbsize):
+                    # A = torch.einsum('ijklmn,ijkop->iklmnop', _k, _q) / args.temperature
+                    A = torch.einsum('ijklm,ijkn->iklmn',
+                        _k, _q[..., pb:pb+pbsize]) 
+                    
+                    A[0, :, len(args.long_mem):] += D[..., pb:pb+pbsize].cuda()
+
+                    _, N, T, h1w1, hw = A.shape
+                    A = A.view(N, T*h1w1, hw)
+                    A /= args.temperature
+
+                    weights, ids = torch.topk(A, args.topk_vis, dim=-2)
+                    weights = torch.nn.functional.softmax(weights, dim=-2)
+                    
+                    w_s.append(weights.cpu())
+                    i_s.append(ids.cpu())
+
+                # import pdb; pdb.set_trace()
+
+                weights = torch.cat(w_s, dim=-1)
+                ids = torch.cat(i_s, dim=-1)
+                Ws += [w for w in weights]
+                Is += [ii for ii in ids]
+
+            # Ws, Is = torch.cat(Ws, 1), torch.cat(Is, 1)         # A = torch.cat(As, dim=1) 
+
+            t04 = time.time()
+            print(t04-t03, 'affinity forward, max mem', torch.cuda.max_memory_allocated() / (1024**2))
+
+            if isinstance(lbl_set, list):
+                lbl_set = torch.cat(lbl_set)[None]
+            lbls_resize[0, n_context*2 - 1:] *= 0
+            lbl_set, lbls_resize = lbl_set[0], lbls_resize[0]
+
+                
+            ##################################################################
+            # Label propagation
+            ##################################################################
+
+            maps = []
+            keypts = []
+            images = []
+            for it in range(indices.shape[0]):
+                if it % 10 == 0:
+                    print(it)
+
+                lbls_base = lbls_resize[indices[it]].cuda()
+                flat_lbls = lbls_base.flatten(0, 2).transpose(0, 1)
+
+                predlbls = (flat_lbls[:, Is[it]] * Ws[it].cuda()[None]).sum(1)
+                predlbls = predlbls.view(-1, *feats.shape[-2:])
+
+                # print(predlbls.mean(-1).mean(-1))
+                #predlbls = hard_prop(predlbls)
+
+                predlbls = predlbls.permute(1,2,0)
+
+                img_now = imgs_toprint[it + n_context].permute(1,2,0).numpy() * 255
+                            
+                if it > 0:
+                    lbls_resize[it + n_context] = predlbls
+                else:
+                    predlbls = lbls_resize[0]
+
+                if args.norm_mask:
+                    # import pdb; pdb.set_trace()
+                    predlbls[:, :, :] -= predlbls.min(-1)[0][:, :, None]
+                    predlbls[:, :, :] /= predlbls.max(-1)[0][:, :, None]
+
+                _maps = []
+
+                if 'jhmdb' in args.filelist.lower():
+                    coords, predlbls_sharp = process_pose(predlbls, lbl_set)
+                    keypts.append(coords)
+                    pose_map = utils.vis_pose(np.array(img_now).copy(), coords.numpy() * params['mapScale'][..., None])
+                    _maps += [pose_map]
 
 
-            # Save Predictions            
-            if 'VIP' in args.filelist:
-                outpath = os.path.join(save_path, 'videos'+meta['img_paths'][it+n_context][0].split('videos')[-1])
-                os.makedirs(os.path.dirname(outpath), exist_ok=True)
-            else:
-                outpath = os.path.join(save_path, str(batch_idx) + '_' + str(it))
+                # Save Predictions            
+                if 'VIP' in args.filelist:
+                    outpath = os.path.join(save_path, 'videos'+meta['img_paths'][it+n_context][0].split('videos')[-1])
+                    os.makedirs(os.path.dirname(outpath), exist_ok=True)
+                else:
+                    outpath = os.path.join(save_path, str(batch_idx) + '_' + str(it))
 
-            heatmap, lblmap = dump_predictions(
-                predlbls.cpu().numpy(),
-                lbl_set, img_now, outpath)
+                heatmap, lblmap = dump_predictions(
+                    predlbls.cpu().numpy(),
+                    lbl_set, img_now, outpath)
 
-            _maps += [heatmap, lblmap]
-            maps.append(_maps)
-            images.append(img_now)
+                _maps += [heatmap, lblmap]
+                maps.append(_maps)
+                images.append(img_now)
+
+                if args.visdom:
+                    [vis.image(np.uint8(_m).transpose(2, 0, 1)) for _m in _maps]
+
+            if len(keypts) > 0:
+                # import pdb; pdb.set_trace()
+                coordpath = os.path.join(save_path, str(batch_idx) + '.dat')
+                np.stack(keypts, axis=-1).dump(coordpath)
 
             if args.visdom:
-                [vis.image(np.uint8(_m).transpose(2, 0, 1)) for _m in _maps]
-
-        if len(keypts) > 0:
-            # import pdb; pdb.set_trace()
-            coordpath = os.path.join(save_path, str(batch_idx) + '.dat')
-            np.stack(keypts, axis=-1).dump(coordpath)
-
-        if args.visdom:
-            # wandb.log({'vid%s' % batch_idx: [wandb.Image(mm[0]) for mm in maps]})  
-            wandb.log({'vid%s' % batch_idx: wandb.Video(
-                np.array([m[0] for m in maps]).transpose(0, -1, 1, 2), fps=12, format="gif")})  
-            
-#            import pdb; pdb.set_trace()
-            wandb.log({'plain vid%s' % batch_idx: wandb.Video(
-                np.array(images).transpose(0, -1, 1, 2), fps=12, format="gif")})  
-            
-        torch.cuda.empty_cache()
-        print('******* Vid %s TOOK %s *******' % (batch_idx, time.time() - t_vid))
+                # wandb.log({'vid%s' % batch_idx: [wandb.Image(mm[0]) for mm in maps]})  
+                wandb.log({'vid%s' % batch_idx: wandb.Video(
+                    np.array([m[0] for m in maps]).transpose(0, -1, 1, 2), fps=12, format="gif")})  
+                
+    #            import pdb; pdb.set_trace()
+                wandb.log({'plain vid%s' % batch_idx: wandb.Video(
+                    np.array(images).transpose(0, -1, 1, 2), fps=12, format="gif")})  
+                
+            torch.cuda.empty_cache()
+            print('******* Vid %s TOOK %s *******' % (batch_idx, time.time() - t_vid))
 
 
 if __name__ == '__main__':
