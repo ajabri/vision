@@ -14,6 +14,8 @@ import cv2
 import visdom
 import utils
 
+import kornia
+import kornia.augmentation as K
 
 from matplotlib import cm
 color = cm.get_cmap('winter')
@@ -64,7 +66,7 @@ class TimeCycle(nn.Module):
             self.dropout_rate = getattr(args, 'dropout', 0)
             self.featdrop_rate = getattr(args, 'featdrop', 0)
             self.model_type = getattr(args, 'model_type', 'scratch')
-            self.temperature = getattr(args, 'temp', 1)
+            self.temperature = getattr(args, 'temp', getattr(args, 'temperature',1))
             self.shuffle = getattr(args, 'shuffle', 0)
             self.xent_weight = getattr(args, 'xent_weight', False)
         else:
@@ -78,7 +80,7 @@ class TimeCycle(nn.Module):
             self.shuffle = False
             self.xent_weight = False
 
-        
+        print('Model temp:', self.temperature)
         self.encoder = utils.make_encoder(args).cuda()
 
 
@@ -124,9 +126,32 @@ class TimeCycle(nn.Module):
         self.viz = visdom.Visdom(port=8095, env='%s_%s' % (getattr(args, 'name', 'test'), '')) #int(time.time())))
         self.viz.close()
 
+        if not self.viz.check_connection():
+            self.viz = None
+
         if vis is not None:
             self._viz = vis
     
+        p_sz, stride = 64, 32
+        self.k_patch =  nn.Sequential(
+            K.RandomResizedCrop(size=(p_sz, p_sz), scale=(0.7, 0.9), ratio=(0.7, 1.3))
+        )
+        self.k_frame = nn.Sequential(
+            # K.ColorJitter(0.1, 0.1, 0.1, 0),
+            K.RandomResizedCrop(size=(256, 256), scale=(0.8, 0.9), ratio=(0.7, 1.3))
+        )
+        # self.k_frame_same = nn.Sequential(
+        #     K.RandomResizedCrop(size=(256, 256), scale=(0.8, 1.0), same_on_batch=True)
+        # )
+        # self.k_frame_same = None
+        self.k_frame_same = nn.Sequential(
+            kornia.geometry.transform.Resize(256 + 20),
+            kornia.augmentation.RandomCrop((256, 256), same_on_batch=True),
+        )
+
+        self.unfold = torch.nn.Unfold((p_sz,p_sz), dilation=1, padding=0, stride=(stride, stride))
+
+
     def infer_dims(self):
         # if '2D' in str(type(self.encoder.conv1)):
         in_sz = 256
@@ -328,7 +353,7 @@ class TimeCycle(nn.Module):
 
         # import pdb; pdb.set_trace()
 
-    def forward(self, x, orig=None, just_feats=False, visualize=False, targets=None):
+    def forward(self, x, orig=None, just_feats=False, visualize=False, targets=None, unfold=False):
         # x = x.cpu() * 0 + torch.randn(x.shape)
         # x = x.cuda()
         # orig = orig.cpu() * 0 + torch.randn(orig.shape)
@@ -344,37 +369,38 @@ class TimeCycle(nn.Module):
 
         # x = F.dropout(x)
     
-        if _N == 1 and visualize and False:
+        if _N == 1 and (visualize and False or unfold):
             # patchify with unfold
-            _sz, res = 80, 10
-            stride = utils.get_stride(H, _sz, res)
-            B, C, H, W = orig.shape
+            # _sz, res = 80, 10
+            # stride = utils.get_stride(H, _sz, res)
+            _sz = self.unfold.kernel_size[0]
+            x = x.flatten(0, 1)
 
-            unfold = torch.nn.Unfold((_sz,_sz), dilation=1, padding=0, stride=(stride, stride))
-            x = unfold(orig.view(B, C, H, W))
-            x = x.view(B, 1, C, _sz, _sz, x.shape[-1]).permute(0, -1, 2, 1, 3, 4)
-            # x = x.cuda()
+            # if self.k_frame_same is None:
+            #     import pdb; pdb.set_trace()
 
-            ff, mm = [], []
-            _bsz = 100
-            for i in range(0, x.shape[1], _bsz):
-                fff, mmm = self.pixels_to_nodes(x[:, i:i+_bsz].cuda())
-                ff.append(fff)
-                mm.append(mmm)
+            x = self.k_frame_same(x)
+            x = self.k_frame(x)
+            x = self.unfold(x)
 
-            ff = torch.cat(ff, dim=-1)
-            mm = torch.cat(mm, dim=1)
+            x, _N = x.view(B, T, C, _sz, _sz, x.shape[-1]), x.shape[-1]
+            x = x.permute(0, -1, 1, 2, 3, 4)   # B x _N x T x C x H x W
+            x = x.flatten(0, 2)
 
+            x = self.k_patch(x)
+            x = x.view(B, _N, T, C, _sz, _sz).transpose(2, 3)
             # import pdb; pdb.set_trace()
+            x = x.cuda()
         else:
+            # import pdb; pdb.set_trace()
             x = x.transpose(1,2).view(B, _N, C, T, H, W)
 
-            if self.shuffle > np.random.random():
-                shuffle = torch.randperm(B*_N)
-                x = x.reshape(B*_N, C, T, H, W)[shuffle]
-                x = x.view(B, _N, C, T, H, W)
-                
-            ff, mm = self.pixels_to_nodes(x)
+        if self.shuffle > np.random.random():
+            shuffle = torch.randperm(B*_N)
+            x = x.reshape(B*_N, C, T, H, W)[shuffle]
+            x = x.view(B, _N, C, T, H, W)
+            
+        ff, mm = self.pixels_to_nodes(x)
 
         # _ff = ff.view(*ff.shape[:-1], h, w)
         if just_feats:
@@ -402,7 +428,7 @@ class TimeCycle(nn.Module):
         # PatchGraph
         #################################################################
         
-        if visualize: #np.random.random() < 0.05 and visualize:
+        if visualize and self.viz is not None: #np.random.random() < 0.05 and visualize:
             with torch.no_grad():
 
                 if ff.device.index == 0:
@@ -457,10 +483,11 @@ class TimeCycle(nn.Module):
                     A21s.append(A2)
                     AAs.append(AA)
 
-                if np.random.random() < (0.05 / len(t_pairs)) or visualize: # and False:
+                if (np.random.random() < (0.05 / len(t_pairs)) or visualize) and (self.viz is not None): # and False:
                     self.viz.text('%s %s' % (t1, t2), opts=dict(height=1, width=10000), win='div')
                     with torch.no_grad():
                         self.visualize_frame_pair(x, ff, mm, t1, t2)
+                        # import pdb; pdb.set_trace()
 
 
             # longer cycle:
@@ -487,20 +514,22 @@ class TimeCycle(nn.Module):
 
                     xent_loss, acc = self.compute_xent_loss(aa, log_aa, weight=xent_weight)
                     kldv_loss = self.compute_kldv_loss(aa, log_aa, targets=targets)
-                    if targets:
+
+                    if targets is not None:
                         xent_loss*=0
 
                     xents.append(xent_loss)
                     kldvs.append(kldv_loss)
                     
                     diags['acc cyc %s' % str(i)] = acc
-                    diags['xent cyc %s' % str(i)] = xent_loss.mean().detach()
 
-                    if targets:
-                        diags['kl cyc %s' % str(i)] = xent_loss.mean().detach()
+                    if targets is not None:
+                        diags['kl cyc %s' % str(i)] = kldv_loss.mean().detach()
+                    else:
+                        diags['xent cyc %s' % str(i)] = xent_loss.mean().detach()
 
             
-        if _N > 1 and (np.random.random() < (0.01 / len(t_pairs)) or visualize): # and False:
+        if _N > 1 and (np.random.random() < (0.01 / len(t_pairs)) or visualize) and self.viz is not None: # and False:
             # all patches
             all_x = x.permute(0, 3, 1, 2, 4, 5)
             all_x = all_x.reshape(-1, *all_x.shape[-3:])
@@ -546,7 +575,8 @@ class TimeCycle(nn.Module):
 
     def compute_xent_loss(self, A, log_AA, weight=None, targets=None):
         # Cross Entropy
-        targets = targets or self.xent_targets(A)
+        if targets is None:
+            targets = self.xent_targets(A)
 
         if self.xent_coef > 0:
             _xent_loss = self.xent(log_AA, targets)
@@ -561,7 +591,9 @@ class TimeCycle(nn.Module):
 
     def compute_kldv_loss(self, A, log_AA, targets=None):
         # KL Div with Smoothed 2D Targets
-        targets = targets or self.kldv_targets(A)
+        if targets is None:
+            targets = self.kldv_targets(A)
+            
         if self.kldv_coef > 0:
             kldv_loss = self.kldv(log_AA, targets)
             # print(kldv_loss, log_AA.min(), AA.min(), A.min())

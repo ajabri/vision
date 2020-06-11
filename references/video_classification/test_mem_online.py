@@ -91,7 +91,7 @@ parser.add_argument('--no-maxpool', default=False, action='store_true', help='')
 parser.add_argument('--use-res4', default=False, action='store_true', help='')
 parser.add_argument('--no-l2', default=False, action='store_true', help='')
 
-parser.add_argument('--long-mem', default=[0], type=int, nargs='+', help='')
+parser.add_argument('--long-mem', default=[0], type=int, nargs='*', help='')
 parser.add_argument('--texture', default=False, action='store_true', help='')
 parser.add_argument('--round', default=False, action='store_true', help='')
 
@@ -99,6 +99,8 @@ parser.add_argument('--time-dilation', default=1, type=int, help='time dilation 
 parser.add_argument('--mapRatio', default=1, type=int, help='map aspect ratio')
 
 parser.add_argument('--norm_mask', default=False, action='store_true', help='')
+
+parser.add_argument('--finetune', default=0, type=int, help='')
 
 args = parser.parse_args()
 params = {k: v for k, v in args._get_kwargs()}
@@ -121,7 +123,7 @@ vis = None
 if args.visdom:
     vis = visdom.Visdom(server=args.server, port=8095, env='main_davis_viz1'); vis.close()
     import wandb
-    wandb.init(project='palindromes')
+    wandb.init(project='palindromes', group='test_online')
     vis.close()
 
 # Random seed
@@ -155,11 +157,22 @@ def main():
     global best_loss
     start_epoch = 0  # start from epoch 0 or last checkpoint epoch
     
+    args.kldv_coef = 1
+    args.long_coef = 1
+
+    args.frame_transforms = 'crop'
+    args.frame_aug = 'grid'
+    args.npatch = 49
+    args.img_size = 256
+    args.pstride = [0.5,0.5]
+    args.patch_size = [64, 64, 3]
+
+    args.visualize=False
+
     model = tc.TimeCycle(
         args,
         vis=vis
     ).cuda()
-    # model = Wrap(model)
     
     params['mapScale'] = model(torch.zeros(1, 10, 3, 320, 320).cuda(), just_feats=True)[1].shape[-2:]
     params['mapScale'] = 320 // np.array(params['mapScale'])
@@ -170,7 +183,6 @@ def main():
         batch_size=int(params['batchSize']), shuffle=False,
         num_workers=args.workers, pin_memory=True)
 
-
     cudnn.benchmark = False
     print('    Total params: %.2fM' % (sum(p.numel() for p in model.parameters())/1000000.0))
 
@@ -178,6 +190,7 @@ def main():
     if os.path.isfile(args.resume):
         print('==> Resuming from checkpoint..')
         checkpoint = torch.load(args.resume)
+
         utils.partial_load(checkpoint['model'], model, skip_keys=['head'])
 
         del checkpoint
@@ -191,9 +204,10 @@ def main():
     
     print('\Testing')
     # with torch.no_grad():
-    test_loss = test(val_loader, model, 1, use_cuda)
+    test_loss = test(val_loader, model, 1, use_cuda, args)
             
 
+from matplotlib import cm
 def dump_predictions(predlbls, lbl_set, img_now, prefix):
     sz = img_now.shape[:-1]
 
@@ -213,11 +227,11 @@ def dump_predictions(predlbls, lbl_set, img_now, prefix):
     predlbls_val = np.zeros((*sz, 3))
 
     ids = np.argmax(predlbls_cp[:, :, 1 : len(lbl_set)], 2)
-    
-    predlbls_val = np.argmax(predlbls_cp, axis=-1)
-    predlbls_val = np.array(lbl_set, dtype=np.int32)[predlbls_val]        
-    # predlbls_val = predlbls_val.astype(np.uint8)
 
+    predlbls_val = np.argmax(predlbls_cp, axis=-1)
+    predlbls_val = np.array(lbl_set, dtype=np.int32)[predlbls_val]      
+
+    # predlbls_val = predlbls_val.astype(np.uint8)
     # if img_now.shape[0] != args.outSize:
     #     img_now = cv2.resize(img_now, (args.outSize, args.outSize), interpolation=cv2.INTER_LINEAR)
 
@@ -227,9 +241,14 @@ def dump_predictions(predlbls, lbl_set, img_now, prefix):
     # activation_heatmap = cv2.applyColorMap(predlbls, cv2.COLORMAP_JET)
     img_with_heatmap =  np.float32(img_now) * 0.5 + np.float32(predlbls_val2) * 0.5
 
-    
-    # imname  = prefix + '_blend.jpg'
-    # imageio.imwrite(imname, np.uint8(img_with_heatmap))
+
+    predlbls_soft = predlbls_cp[..., 1]
+    predlbls_soft = cv2.resize(predlbls_soft, (img_now.shape[1], img_now.shape[0]), interpolation=cv2.INTER_NEAREST)
+    predlbls_soft = cm.jet(predlbls_soft)[..., :3] * 255.0
+    img_with_heatmap2 =  np.float32(img_now) * 0.5 + np.float32(predlbls_soft) * 0.5
+
+    imname  = prefix + '_blend.jpg'
+    imageio.imwrite(imname, np.uint8(img_with_heatmap))
 
     if prefix[-4] != '.':
         imname2 = prefix + '_mask.png'
@@ -246,7 +265,7 @@ def dump_predictions(predlbls, lbl_set, img_now, prefix):
 
     imageio.imwrite(imname2, np.uint8(predlbls_val))
 
-    return img_with_heatmap, predlbls_val
+    return img_with_heatmap, predlbls_val, img_with_heatmap2
 
 
 def softmax_base(A):
@@ -311,7 +330,7 @@ def process_pose(predlbls, lbl_set, topk=3):
 
     return current_coord.cpu(), predlbls_val_sharp
 
-def test(val_loader, model, epoch, use_cuda):
+def test(val_loader, model, epoch, use_cuda, args):
 
     save_path = args.save_path + '/'
 
@@ -323,11 +342,20 @@ def test(val_loader, model, epoch, use_cuda):
     D = None
     t_vid = 0
 
-    _model_state = model.state_dict().copy()
+    import copy
+    _model_state = copy.deepcopy(model.state_dict())
+    # _model_state = model.state_dict().copy()
+
+    res4 = model.encoder.model.layer4
+    ssfc = model.selfsim_fc
+
 
     for batch_idx, (imgs_total, imgs_orig, lbl_set, lbls_tensor, lbls_onehot, lbls_resize, meta) in enumerate(val_loader):
         t_vid = time.time()
         print('******* Vid %s *******' % batch_idx)
+
+        # import pdb; pdb.set_trace()
+
 
         # measure data loading time
         imgs_total = imgs_total.cuda()
@@ -343,38 +371,66 @@ def test(val_loader, model, epoch, use_cuda):
         ##################################################################
         # Compute image features
         ##################################################################        
+        print("MODEL StATE AVG", list(_model_state.items())[0][1].mean())
+
+        model.encoder.model.layer4 = res4
+        model.selfsim_fc   = ssfc
+
         model.load_state_dict(_model_state)
-        optimizer = torch.optim.SGD(model.parameters(), lr=0.01, momentum=0.9, weight_decay=0)
+
+
+        model.xent_coef, model.kldv_coef = 1, 0
+        model.dropout_rate = 0.1
+        train_len = 3
 
         def fit(model, video, targets, steps=1):
-            for _ in range(steps):
-                output, xent_loss, kldv_loss, diagnostics = model(video, orig=video, targets=targets)
-                loss = (xent_loss.mean() + kldv_loss.mean())
+            optimizer = torch.optim.Adam(model.parameters(), lr=0.00005)#, momentum=0.9, weight_decay=0)
+            # optimizer = torch.optim.SGD(model.parameters(), lr=0.1)#, momentum=0.9, weight_decay=0)
 
+            for _ in range(steps):
+                fps = np.random.randint(1, 3)
+                idx = np.random.randint(video.shape[1]//fps - train_len)
+                x = video[:, ::fps][:, idx:idx+train_len].cuda()
+
+                # output, xent_loss, kldv_loss, diagnostics = model(video, orig=video, targets=targets)
+                # print('step', _, kldv_loss.mean().item(), diagnostics)
+
+                output, xent_loss, kldv_loss, diagnostics = model(x, orig=x[0], unfold=True)
+                if (_ % 20) == 0:
+                    print('step', _, xent_loss.mean().item(), diagnostics)
+
+                loss = (xent_loss.mean() + kldv_loss.mean())
                 optimizer.zero_grad()
                 loss.backward()
                 optimizer.step()
+            
+            optimizer = None
+            torch.cuda.empty_cache()
 
         # make labels: uniform prob to indices with same mask id
-        targets = lbls_onehot.max(-1)[1]
-        targets = (targets[0, 0:1, ..., None, None] == targets[0, 0:1])
-        targets = targets*1.0/ targets.sum(-1).sum(-1)[..., None, None]*1.0
-        
+        # targets = lbls_onehot.max(-1)[1]
+        # targets = (targets[0, 0:1, ..., None, None] == targets[0, 0:1])
+        # targets = targets*1.0/ targets.sum(-1).sum(-1)[..., None, None]*1.0
+        # targets = targets.flatten(1,2).flatten(-2,-1).cuda()
+
         b, bsize = 0, 5
-        # for b in range(0, imgs_total.shape[1], bsize):
-        for iters in range(10):
-            video  = imgs_total[:, b:b+bsize]
-            fit(model, video, targets)
-            import pdb; pdb.set_trace()
+        # fit(model, video, targets, steps=nsteps)
+        fit(model, imgs_total, None, steps=args.finetune)
+        # import pdb; pdb.set_trace()
+        torch.cuda.empty_cache()
+
+        model.encoder.model.layer4 = None
+        model.selfsim_fc = tc.Identity()
+        model.dropout_rate = 0.0
 
         with torch.no_grad():
-
             t00 = time.time()
             feats = []
             bsize = 5
             for b in range(0, imgs_total.shape[1], bsize):
-                node, feat = model(imgs_total[:, b:b+bsize], orig=None, just_feats=True)
+                node, feat = model(imgs_total[:, b:b+bsize].cuda(), orig=None, just_feats=True)
                 feats.append(feat.cpu())
+
             feats = torch.cat(feats, dim=2)
             
             # nodes, feats = model.module(imgs_total, None, True, func='forward')
@@ -405,10 +461,9 @@ def test(val_loader, model, epoch, use_cuda):
 
                     ll.append(idx)
 
-                ss = [
-                    (torch.arange(n_context)[None].repeat(im_num, 1) + 
-                        torch.arange(im_num)[:, None])[:, 1:]
-                ]
+                ss = [(torch.arange(n_context)[None].repeat(im_num, 1) +  torch.arange(im_num)[:, None])[:, :]]
+
+                # if len(args.long_mem) == 0 or True:
                 # import pdb; pdb.set_trace()
                 
                 return ll + ss
@@ -435,6 +490,7 @@ def test(val_loader, model, epoch, use_cuda):
                     A = torch.einsum('ijklm,ijkn->iklmn',
                         _k, _q[..., pb:pb+pbsize]) 
                     
+                    # import pdb; pdb.set_trace()
                     A[0, :, len(args.long_mem):] += D[..., pb:pb+pbsize].cuda()
 
                     _, N, T, h1w1, hw = A.shape
@@ -462,7 +518,10 @@ def test(val_loader, model, epoch, use_cuda):
             if isinstance(lbl_set, list):
                 lbl_set = torch.cat(lbl_set)[None]
             lbls_resize[0, n_context*2 - 1:] *= 0
-            lbl_set, lbls_resize = lbl_set[0], lbls_resize[0]
+
+            # if lbl_set.ndim > 2:
+            # import pdb; pdb.set_trace()
+            lbl_set, lbls_resize = lbl_set.squeeze(0), lbls_resize.squeeze(0)
 
                 
             ##################################################################
@@ -488,11 +547,12 @@ def test(val_loader, model, epoch, use_cuda):
                 predlbls = predlbls.permute(1,2,0)
 
                 img_now = imgs_toprint[it + n_context].permute(1,2,0).numpy() * 255
-                            
+                
                 if it > 0:
                     lbls_resize[it + n_context] = predlbls
                 else:
                     predlbls = lbls_resize[0]
+                    lbls_resize[it + n_context] = predlbls
 
                 if args.norm_mask:
                     # import pdb; pdb.set_trace()
@@ -515,11 +575,11 @@ def test(val_loader, model, epoch, use_cuda):
                 else:
                     outpath = os.path.join(save_path, str(batch_idx) + '_' + str(it))
 
-                heatmap, lblmap = dump_predictions(
+                heatmap, lblmap, heatmap_prob = dump_predictions(
                     predlbls.cpu().numpy(),
                     lbl_set, img_now, outpath)
 
-                _maps += [heatmap, lblmap]
+                _maps += [heatmap, lblmap, heatmap_prob]
                 maps.append(_maps)
                 images.append(img_now)
 
@@ -533,8 +593,16 @@ def test(val_loader, model, epoch, use_cuda):
 
             if args.visdom:
                 # wandb.log({'vid%s' % batch_idx: [wandb.Image(mm[0]) for mm in maps]})  
-                wandb.log({'vid%s' % batch_idx: wandb.Video(
-                    np.array([m[0] for m in maps]).transpose(0, -1, 1, 2), fps=12, format="gif")})  
+                for m in maps:
+                    wandb.log({'blend vid%s' % batch_idx: wandb.Image(
+                        m[0])})
+
+                # wandb.log({'blend vid%s' % batch_idx: wandb.Video(
+                # np.array([m[0] for m in maps]).transpose(0, -1, 1, 2), fps=12, format="gif")})  
+                
+                wandb.log({'prob vid%s' % batch_idx: wandb.Video(
+                    np.array([m[-1] for m in maps]).transpose(0, -1, 1, 2), fps=12, format="gif")})  
+                
                 
     #            import pdb; pdb.set_trace()
                 wandb.log({'plain vid%s' % batch_idx: wandb.Video(

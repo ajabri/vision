@@ -36,7 +36,7 @@ def test(model, L=5, K=2, T=0.01, opts=[], gpu=0, force=False):
         davis2017path = '/data/yusun/ajabri/davis-2017/'
 
     # model_name = "hardprop_fixedtemp_truerenorm_all_L%s_K%s_T%s_opts%s_M%s" %(L, K, T, ''.join(opts), model_name) 
-    model_name = "IN_L%s_K%s_T%s_opts%s_M%s" %(L, K, T, ''.join(opts), model_name) 
+    model_name = "fix_IN_L%s_K%s_T%s_opts%s_M%s" %(L, K, T, ''.join(opts), model_name) 
 
     if 'nopool' in model_name:
         opts += ['--no-maxpool']
@@ -53,12 +53,13 @@ def test(model, L=5, K=2, T=0.01, opts=[], gpu=0, force=False):
     cmd = ""
 
     outfile = f"{outdir}/converted_{model_name}/results.yaml"
+    online_str = '_online' if '--finetune' in opts else ''
 
     if (not os.path.isfile(outfile)) or force:
         print('Testing', model_name)
         if (not os.path.isdir(f"{outdir}/results_{model_name}")) or force:# or True:
             cmd += f'''
-                python test_mem.py --filelist {datapath}/vallist.txt {model_str} \
+                python test_mem{online_str}.py --filelist {datapath}/vallist.txt {model_str} \
                     --topk_vis {K}   --videoLen {L} --temperature {T} --save-path {outdir}/results_{model_name} \
                     --workers 5  {opts} --gpu-id {gpu} && \
                 '''
@@ -79,18 +80,24 @@ def test(model, L=5, K=2, T=0.01, opts=[], gpu=0, force=False):
     return yaml.load(open(outfile))['dataset']
 
 
-def sweep(models, L, K, T, size, multiprocess=False, slurm=False, force=False, gpu=-1):
+def sweep(models, L, K, T, size, finetune, multiprocess=False, slurm=False, force=False, gpu=-1):
     import itertools
 
     # opts = [['--head-depth', str(-1)]] #['--radius', str(10)], ['--radius', str(5)], ['--radius', str(2.5)]] #, ['--all-nn']]
-    base_opts = ['--cropSize', str(size), '--head-depth', str(-1), '--all-nn', # '--norm_mask'
+    base_opts = ['--cropSize', str(size), '--all-nn', # '--norm_mask'
     #   '--no-maxpool',
     #   '--use-res4'
-      ]
+    ]
+
+    if finetune > 0:
+        base_opts += ['--head-depth', str(0), '--use-res4', '--finetune', str(finetune)]
+    else:
+        base_opts += ['--head-depth', str(-1)]
+
 
     # opts = [base_opts + ['--radius', str(10)], base_opts + ['--radius', str(40)], base_opts + ['--radius', str(5)]]
     # opts = [base_opts + ['--radius', str(10), '--long-mem','0', '5', '10']] #, base_opts + ['--radius', str(5)]]
-    opts = [base_opts + ['--radius', str(12), '--long-mem','0']] #, base_opts + ['--radius', str(5)]]
+    opts = [base_opts + ['--radius', str(12)]]#, '--long-mem','0', ]] #, base_opts + ['--radius', str(5)]]
     # opts = [base_opts + ['--radius', str(10)]] #, base_opts + ['--radius', str(5)]]
 
     prod = list(itertools.product(models, L, K, T, opts))
@@ -115,7 +122,7 @@ def sweep(models, L, K, T, size, multiprocess=False, slurm=False, force=False, g
     elif slurm:
         for p in prod:
 
-            cmd = f"sbatch --export=model_path={p[0]},L={p[1]},K={p[2]},T={p[3]},size={size} /home/ajabri/slurm/davis_test.sh"
+            cmd = f"sbatch --export=model_path={p[0]},L={p[1]},K={p[2]},T={p[3]},size={size},finetune={finetune} /home/ajabri/slurm/davis_test.sh"
             print(cmd)
 
             os.system(cmd)
@@ -183,6 +190,7 @@ if __name__ == '__main__':
     parser.add_argument('--L', default=[3], type=int, nargs='+')
     parser.add_argument('--K', default=[2], type=int, nargs='+')
     parser.add_argument('--T', default=[0.1], type=float, nargs='+')
+    parser.add_argument('--finetune', default=0, type=int)
 
     parser.add_argument('--cropSize', default=480, type=int)
     parser.add_argument('--gpu', default=0, type=int)
@@ -193,12 +201,12 @@ if __name__ == '__main__':
         args.model_path = models
 
     if args.slurm:
-        sweep(args.model_path, args.L, args.K, args.T, args.cropSize,
+        sweep(args.model_path, args.L, args.K, args.T, args.cropSize, args.finetune,
             slurm=args.slurm,
             force=args.force)
         
     else:
-        sweep(args.model_path, args.L, args.K, args.T, args.cropSize,
+        sweep(args.model_path, args.L, args.K, args.T, args.cropSize, args.finetune,
             multiprocess=args.multiprocess,
             force=args.force,
             gpu=args.gpu)

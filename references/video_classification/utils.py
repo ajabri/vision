@@ -1318,7 +1318,7 @@ class RestrictAttention(nn.Module):
         return x * mask[0]
 
 
-from spatial_correlation_sampler import SpatialCorrelationSampler
+# from spatial_correlation_sampler import SpatialCorrelationSampler
 
 # class Patchifier(nn.Module):
 #     def __init__

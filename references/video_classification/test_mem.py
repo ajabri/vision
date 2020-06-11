@@ -91,7 +91,7 @@ parser.add_argument('--no-maxpool', default=False, action='store_true', help='')
 parser.add_argument('--use-res4', default=False, action='store_true', help='')
 parser.add_argument('--no-l2', default=False, action='store_true', help='')
 
-parser.add_argument('--long-mem', default=[0], type=int, nargs='+', help='')
+parser.add_argument('--long-mem', default=[0], type=int, nargs='*', help='')
 parser.add_argument('--texture', default=False, action='store_true', help='')
 parser.add_argument('--round', default=False, action='store_true', help='')
 

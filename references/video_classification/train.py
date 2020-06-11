@@ -174,7 +174,73 @@ def visualize(model, data_loader, device, vis=None):
             # if (i+1) % 4 == 0:
             #     # import pdb; pdb.set_trace()
             #     input('#### %s #### %s' % (i, 'Next visualizations?'))
-             
+
+def tsne(model, data_loader, device, vis=None):
+    f1 = []
+    X1 = []
+    for i, (video, orig) in enumerate(data_loader):
+        start_time = time.time()
+        print('#### %s ####' % i)
+
+        video = video.to(device)
+        f, m = model(video, orig=orig, just_feats=True)
+
+        if True:
+            vid = video.view(*video.shape[:2], video.shape[2]//3, 3, *video.shape[-2:])
+            vid = vid.flatten(0, -4)
+            ff = f.permute(0, 2, 3, 1).flatten(0, -2)
+            X1.append(vid.detach().cpu())            
+            f1.append(ff.detach().cpu())
+            # import pdb; pdb.set_trace()
+        else:
+            feats = torch.nn.functional.normalize(m.sum(-1).sum(-1).transpose(-1, -2).contiguous().view(-1, m.shape[1]), dim=-1, p=2).detach().cpu()
+    
+            f1.append(feats)
+            X1.append(video.view(-1, *video.shape[2:]).detach().cpu())
+            
+        if len(f1) > 50:
+            break
+    
+    f1, X1 = torch.cat(f1), torch.cat(X1)
+    X1 -= X1.min()
+    X1 /= X1.max()
+
+    import pickle
+    import matplotlib
+    from matplotlib.pyplot import imshow
+    from PIL import Image
+    from sklearn.manifold import TSNE
+
+    for _,idx in enumerate(range(0, f1.shape[0], 49)):
+        ff, xx = f1[idx:idx+49], X1[idx:idx+49]
+        tsne = TSNE(n_components=2, learning_rate=150, perplexity=30, angle=0.2, verbose=2).fit_transform(ff)
+
+        tx, ty = tsne[:,0], tsne[:,1]
+        tx = (tx-np.min(tx)) / (np.max(tx) - np.min(tx))
+        ty = (ty-np.min(ty)) / (np.max(ty) - np.min(ty))
+
+
+        width = 500
+        height = 500
+        max_dim = 100
+
+        full_image = Image.new('RGBA', (width, height))
+        for img, x, y in zip(xx, tx, ty):
+            tile = Image.fromarray((img.numpy().transpose(1,2,0) * 255).astype(np.uint8))
+            rs = max(1, tile.width/max_dim, tile.height/max_dim)
+            tile = tile.resize((int(tile.width/rs), int(tile.height/rs)), Image.ANTIALIAS)
+            full_image.paste(tile, (int((width-max_dim)*x), int((height-max_dim)*y)), mask=tile.convert('RGBA'))
+
+        out_img = np.array(full_image).transpose(2, 0, 1)[:3]
+        vis.vis.image(out_img)
+        full_image.save('scene_tsne%s.png' % str(idx))
+
+        if _ > 20:
+            break
+        
+    import pdb; pdb.set_trace()
+
+    
 def visualize2(model, data_loader, device, vis=None):
     import torch.nn.functional as F
     import time
@@ -500,8 +566,9 @@ def main(args):
     ########################### 
 
     if args.visualize:
-        nn_visualize(model, data_loader, device, vis=vis)
+        # nn_visualize(model, data_loader, device, vis=vis)
         # visualize(model, data_loader, device, vis=vis)
+        tsne(model, data_loader, device, vis=vis)
         return
 
     if args.test_only:
