@@ -152,18 +152,19 @@ def hard_prop(predlbls, axis=-1):
 #     lblimg = (((lblimg2 + 1) / 128).round() * 128).astype(lblimg.dtype)
 
 ######################################################################
+
 from matplotlib import cm
 
 class DavisSet(data.Dataset):
-    def __init__(self, params, is_train=True):
+    def __init__(self, args, is_train=True):
 
-        self.filelist = params['filelist']
-        self.imgSize = params['imgSize']
-        self.videoLen = params['videoLen']
-        self.mapScale = params['mapScale']
+        self.filelist = args.filelist
+        self.imgSize = args.imgSize
+        self.videoLen = args.videoLen
+        self.mapScale = args.mapScale
 
-        self.texture = params['texture']
-        self.round = params['round']
+        self.texture = args.texture
+        self.round = args.round
 
         f = open(self.filelist, 'r')
         self.jpgfiles = []

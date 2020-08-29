@@ -4,8 +4,6 @@ import torch.nn.functional as F
 from scipy.ndimage.filters import gaussian_filter
 
 import torchvision
-import resnet3d
-import resnet2d
 import itertools
 
 import time
@@ -50,12 +48,12 @@ class FoldTime(nn.Module):
 
 
 
-class TimeCycle(nn.Module):
+class CRaWl(nn.Module):
     def garg(self, k, d):
         return getattr(self.args, k) if hasattr(self.args, k) else d
         
     def __init__(self, args=None, vis=None):
-        super(TimeCycle, self).__init__()
+        super(CRaWl, self).__init__()
         
         self.args = args
 
@@ -81,7 +79,7 @@ class TimeCycle(nn.Module):
             self.xent_weight = False
 
         print('Model temp:', self.temperature)
-        self.encoder = utils.make_encoder(args).cuda()
+        self.encoder = utils.make_encoder(args).to(args.device)
 
 
         self.infer_dims()
@@ -93,10 +91,8 @@ class TimeCycle(nn.Module):
         # self.selfsim_head = self.make_head([self.enc_hid_dim, 2*self.enc_hid_dim, self.enc_hid_dim])
         # self.context_head = self.make_head([self.enc_hid_dim, 2*self.enc_hid_dim, self.enc_hid_dim])
 
-        import resnet3d, resnet2d
         if self.garg('cal_coef', 0) > 0:
             self.stack_encoder = utils.make_stack_encoder(self.enc_hid_dim)
-            # self.aff_encoder = resnet2d.Bottleneck(1, 128,)
 
         # # assuming no fc pre-training
         # for m in self.modules():
@@ -222,7 +218,7 @@ class TimeCycle(nn.Module):
         return A * mask
 
     def dropout_mask(self, A):
-        return (torch.rand(A.shape) < self.dropout_rate).cuda()
+        return (torch.rand(A.shape) < self.dropout_rate).to(args.device)
 
     def compute_affinity(self, x1, x2, do_dropout=True, zero_diagonal=None):
         B, C, N = x1.shape
@@ -359,9 +355,9 @@ class TimeCycle(nn.Module):
         # orig = orig.cpu() * 0 + torch.randn(orig.shape)
         # orig = orig.cuda()
         
-        xents = [torch.tensor([0.]).cuda()]
-        kldvs = [torch.tensor([0.]).cuda()]
-        diags = dict(skip_accur=torch.tensor([0.]).cuda())
+        xents = [torch.tensor([0.]).to(self.args.device)]
+        kldvs = [torch.tensor([0.]).to(self.args.device)]
+        diags = dict(skip_accur=torch.tensor([0.]).to(self.args.device))
 
         # Assume input is B x T x N*C x H x W        
         B, T, C, H, W = x.shape
@@ -390,7 +386,7 @@ class TimeCycle(nn.Module):
             x = self.k_patch(x)
             x = x.view(B, _N, T, C, _sz, _sz).transpose(2, 3)
             # import pdb; pdb.set_trace()
-            x = x.cuda()
+            x = x.to(self.args.device)
         else:
             # import pdb; pdb.set_trace()
             x = x.transpose(1,2).view(B, _N, C, T, H, W)

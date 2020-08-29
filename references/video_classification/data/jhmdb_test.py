@@ -157,15 +157,15 @@ from matplotlib import cm
 class JhmdbSet(data.Dataset):
     def __init__(self, params, is_train=True, sigma=0.5):
 
-        self.filelist = params['filelist']
-        self.imgSize = params['imgSize']
-        self.videoLen = params['videoLen']
-        self.mapScale = params['mapScale']
+        self.filelist = args.filelist
+        self.imgSize = args.imgSize
+        self.videoLen = args.videoLen
+        self.mapScale = args.mapScale
 
         self.sigma = sigma
 
-        self.texture = params['texture']
-        self.round = params['round']
+        self.texture = args.texture
+        self.round = args.round
 
         f = open(self.filelist, 'r')
         self.jpgfiles = []

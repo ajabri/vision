@@ -67,7 +67,7 @@ def test(model, L=5, K=2, T=0.01, opts=[], gpu=0, force=False):
 
             print(cmd)
         cmd += f'''
-            python davis/convert_davis.py --in_folder {outdir}/results_{model_name}/ --out_folder {outdir}/converted_{model_name}/ \
+            python eval/davis/convert_davis.py --in_folder {outdir}/results_{model_name}/ --out_folder {outdir}/converted_{model_name}/ \
                 --dataset {datapath} \
                     \
             && python {davis2017path}/python/tools/eval.py \
