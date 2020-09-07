@@ -98,3 +98,20 @@ class VideoList(data.Dataset):
 
     def __len__(self):
         return len(self.jpgfiles)
+
+
+class SingleVideoDataset(data.Dataset):
+    def __init__(self, video, clip_len, fps_range=[1,1], n_clips=100000):
+        self.video = video
+        self.clip_len = clip_len
+        self.fps = fps_range
+        self.n_clips = n_clips
+        
+    def __getitem__(self, index):
+        fps = np.random.randint(*self.fps)
+        idx = np.random.randint(self.video.shape[0]//fps - self.clip_len)
+        x = self.video[::fps][idx:idx+self.clip_len]
+        return x
+        
+    def __len__(self):
+        return self.n_clips

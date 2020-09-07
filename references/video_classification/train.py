@@ -13,7 +13,7 @@ import torchvision.datasets.video_utils
 
 import data
 from data.kinetics import Kinetics400
-from data.video_folder import VideoList
+from data.video import VideoList
 
 import utils
 from utils.sampler import DistributedSampler, UniformClipSampler, RandomClipSampler

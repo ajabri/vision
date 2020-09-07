@@ -12,34 +12,20 @@ import numpy as np
 
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 import torch.backends.cudnn as cudnn
 
+import models
 from models import crawl
 
 from data import davis_test as davis
 from data import jhmdb_test as jhmdb
+from data.video import SingleVideoDataset
 
 import utils
 import test_utils
 
-args = utils.arguments.test_args()
 
-args.imgSize = args.cropSize
-
-print('Context Length:', args.videoLen, 'Image Size:', args.imgSize)
-print('Arguments', args)
-
-vis = None
-if args.visdom:
-    import visdom
-    import wandb
-    vis = visdom.Visdom(server=args.visdom_server, port=8095, env='main_davis_viz1'); vis.close()
-    wandb.init(project='palindromes', group='test_online')
-    vis.close()
-
-def main():
-    
+def main(args, vis):
     # HACK set default training args for online finetune-ing
     args.kldv_coef = 1
     args.long_coef = 1
@@ -52,27 +38,21 @@ def main():
     args.patch_size = [64, 64, 3]
     args.visualize=False
 
-    model = crawl.CRaWl(args, vis=vis).to(args.device)
-    
-    args.mapScale = model(torch.zeros(1, 10, 3, 320, 320).to(args.device), just_feats=True)[1].shape[-2:]
-    args.mapScale = 320 // np.array(args.mapScale)
+    model = models.CRaWl(args, vis=vis).to(args.device)
+    args.mapScale = test_utils.infer_downscale(model)
 
-    dataset = davis.DavisSet(args, is_train=False) if not 'jhmdb' in args.filelist  else \
-            jhmdb.JhmdbSet(args, is_train=False)
-
+    dataset = (davis.DavisSet if not 'jhmdb' in args.filelist  else jhmdb.JhmdbSet)(args)
     val_loader = torch.utils.data.DataLoader(dataset,
         batch_size=int(args.batchSize), shuffle=False, num_workers=args.workers, pin_memory=True)
 
-    cudnn.benchmark = False
+    # cudnn.benchmark = False
     print('Total params: %.2fM' % (sum(p.numel() for p in model.parameters())/1000000.0))
 
     # Load checkpoint.
     if os.path.isfile(args.resume):
         print('==> Resuming from checkpoint..')
         checkpoint = torch.load(args.resume)
-
         utils.partial_load(checkpoint['model'], model, skip_keys=['head'])
-
         del checkpoint
     
     model.eval()
@@ -88,9 +68,7 @@ def main():
             test_loss = test(val_loader, model, args)
             
 
-def test(val_loader, model, args):
-
-    save_path = args.save_path + '/'
+def test(loader, model, args):
 
     end = time.time()
     
@@ -102,55 +80,47 @@ def test(val_loader, model, args):
 
     import copy
     _model_state = copy.deepcopy(model.state_dict())
-    # _model_state = model.state_dict().copy()
 
     res4 = model.encoder.model.layer4
     ssfc = model.selfsim_fc
 
-
-    for batch_idx, (imgs_total, imgs_orig, lbl_set, lbls_tensor, lbls_onehot, lbls_resize, meta) in enumerate(val_loader):
+    for vid_idx, (imgs, imgs_orig, lbls, lbls_orig, lbl_map, meta) in enumerate(loader):
         t_vid = time.time()
-        print('******* Vid %s *******' % batch_idx)
 
         # measure data loading time
-        imgs_total = imgs_total.cuda()
-        bs, total_frame_num, channel_num, height_len, weight_len = imgs_total.shape
+        imgs = imgs.to(args.device)
+        B, N = imgs.shape[:2]
+        assert(B == 1)
 
-        imgs_toprint = [ii for ii in imgs_orig[0]]
-
-        assert(bs == 1)
-
-        folder_paths = meta['folder_path']
-        print('total_frame_num: ' + str(total_frame_num))
+        print('******* Vid %s (%s frames) *******' % (vid_idx, N))
 
         ##################################################################
-        # Compute image features
+        # Self-supervised Adaptation
         ##################################################################        
-        print("MODEL StATE AVG", list(_model_state.items())[0][1].mean())
+        print("Model State Avg (sanity)", list(_model_state.items())[0][1].mean())
 
-        model.encoder.model.layer4 = res4
-        model.selfsim_fc   = ssfc
+        # model.encoder.model.layer4 = res4
+        # model.selfsim_fc = ssfc
 
         model.load_state_dict(_model_state)
 
         model.xent_coef, model.kldv_coef = 1, 0
         model.dropout_rate = 0.1
-        train_len = 3
 
         def fit(model, video, targets, steps=1):
             optimizer = torch.optim.Adam(model.parameters(), lr=0.00005)#, momentum=0.9, weight_decay=0)
-            # optimizer = torch.optim.SGD(model.parameters(), lr=0.1)#, momentum=0.9, weight_decay=0)
+            dataset = SingleVideoDataset(video[0], 3, fps_range=[1,3], n_clips=steps)
+            train_loader = torch.utils.data.DataLoader(dataset,
+                 batch_size=2, shuffle=False, num_workers=args.workers, pin_memory=True)
 
-            for _ in range(steps):
-                fps = np.random.randint(1, 3)
-                idx = np.random.randint(video.shape[1]//fps - train_len)
-                x = video[:, ::fps][:, idx:idx+train_len].cuda()
+            for _, x in enumerate(train_loader):
+                x = x.to(args.device)
 
                 # output, xent_loss, kldv_loss, diagnostics = model(video, orig=video, targets=targets)
                 # print('step', _, kldv_loss.mean().item(), diagnostics)
 
                 output, xent_loss, kldv_loss, diagnostics = model(x, orig=x[0], unfold=True)
-                if (_ % 20) == 0:
+                if (_ % 1) == 0:
                     print('step', _, xent_loss.mean().item(), diagnostics)
 
                 loss = (xent_loss.mean() + kldv_loss.mean())
@@ -167,47 +137,42 @@ def test(val_loader, model, args):
         # targets = targets*1.0/ targets.sum(-1).sum(-1)[..., None, None]*1.0
         # targets = targets.flatten(1,2).flatten(-2,-1).cuda()
 
-        b, bsize = 0, 5
         # fit(model, video, targets, steps=nsteps)
-        fit(model, imgs_total, None, steps=args.finetune)
-        # import pdb; pdb.set_trace()
+        fit(model, imgs, None, steps=args.finetune)
         torch.cuda.empty_cache()
 
-        model.encoder.model.layer4 = None
-        model.selfsim_fc = tc.Identity()
+        # model.encoder.model.layer4 = None
+        # model.selfsim_fc = crawl.Identity()
         model.dropout_rate = 0.0
 
         with torch.no_grad():
 
-            ##################################################################
-            # Compute image features
-            ##################################################################
+        ##################################################################
+        # Compute image features (batched for memory efficiency)
+        ##################################################################
             t00 = time.time()
 
-            feats = []
             bsize = 5
-            for b in range(0, imgs_total.shape[1], bsize):
-                node, feat = model(imgs_total[:, b:b+bsize].cuda(), orig=None, just_feats=True)
+            feats = []
+            for b in range(0, imgs.shape[1], bsize):
+                node, feat = model(imgs[:, b:b+bsize].to(args.device), orig=None, just_feats=True)
                 feats.append(feat.cpu())
 
-            feats = torch.cat(feats, dim=2)
-            
-            # nodes, feats = model.module(imgs_total, None, True, func='forward')
-            feats = feats.squeeze(1)
+            feats = torch.cat(feats, dim=2).squeeze(1)            
             if not args.no_l2:
-                feats = F.normalize(feats, dim=1)
+                feats = torch.nn.functional.normalize(feats, dim=1)
 
             print('computed features', time.time()-t00)
 
-            ##################################################################
-            # Compute affinities
-            ##################################################################
+        ##################################################################
+        # Compute affinities
+        ##################################################################
             
             torch.cuda.empty_cache()
             t03 = time.time()
             
             # Prepare source (keys) and target (query) frame features
-            key_indices = test_utils.context_index_bank(n_context, args.long_mem, total_frame_num - n_context)
+            key_indices = test_utils.context_index_bank(n_context, args.long_mem, N - n_context)
             key_indices = torch.cat(key_indices, dim=-1)
             keys, query = feats[:, :, key_indices], feats[:, :, n_context:]
 
@@ -220,104 +185,114 @@ def test(val_loader, model, args):
             # Flatten source frame features to make context feature set
             keys, query = keys.flatten(-2), query.flatten(-2)
 
-            Ws, Is = test_utils.mem_efficient_batched_affinity(query, keys, mask, 
+            Ws, Is = test_utils.mem_efficient_batched_affinity(query, keys, D, 
                         args.temperature, args.topk_vis, args.long_mem, args.device)
-            # Ws, Is = test_utils.batched_affinity(query, keys, mask, 
+            # Ws, Is = test_utils.batched_affinity(query, keys, D, 
             #             args.temperature, args.topk_vis, args.long_mem, args.device)
 
-            print(time.time()-t03, 'affinity forward, max mem', torch.cuda.max_memory_allocated() / (1024**2))
+            if torch.cuda.is_available():
+                print(time.time()-t03, 'affinity forward, max mem', torch.cuda.max_memory_allocated() / (1024**2))
 
-            if isinstance(lbl_set, list):
-                lbl_set = torch.cat(lbl_set)[None]
-            lbls_resize[0, n_context*2 - 1:] *= 0
 
-            lbl_set, lbls_resize = lbl_set.squeeze(0), lbls_resize.squeeze(0)
+        ##################################################################
+        # Propagate Labels and Save Predictions
+        ###################################################################
+            lbls[0, n_context*2 - 1:] *= 0 
+            lbl_map, lbls = lbl_map.squeeze(0), lbls.squeeze(0)
 
-            ##################################################################
-            # Label propagation
-            ##################################################################
+            maps, keypts = [], []
+            for t in range(key_indices.shape[0]):
+                if t % 10 == 0:
+                    print(t)
 
-            maps = []
-            keypts = []
-            images = []
-            for it in range(key_indices.shape[0]):
-                if it % 10 == 0:
-                    print(it)
+                ctx_lbls = lbls[key_indices[t]].to(args.device)
 
-                lbls_base = lbls_resize[key_indices[it]].cuda()
-                flat_lbls = lbls_base.flatten(0, 2).transpose(0, 1)
+                import pdb; pdb.set_trace()
+                ctx_lbls = ctx_lbls.flatten(0, 2).transpose(0, 1)
 
-                predlbls = (flat_lbls[:, Is[it]] * Ws[it].cuda()[None]).sum(1)
-                predlbls = predlbls.view(-1, *feats.shape[-2:])
+                pred = (ctx_lbls[:, Is[t]] * Ws[t].to(args.device)[None]).sum(1)
+                pred = pred.view(-1, *feats.shape[-2:])
 
-                # print(predlbls.mean(-1).mean(-1))
-                #predlbls = test_utils.hard_prop(predlbls)
+                #pred = test_utils.hard_prop(pred)
 
-                predlbls = predlbls.permute(1,2,0)
+                pred = pred.permute(1,2,0)
 
-                img_now = imgs_toprint[it + n_context].permute(1,2,0).numpy() * 255
+                cur_img = imgs_orig[0, t + n_context].permute(1,2,0).numpy() * 255
                 
-                if it > 0:
-                    lbls_resize[it + n_context] = predlbls
+                if t > 0:
+                    lbls[t + n_context] = pred
                 else:
-                    predlbls = lbls_resize[0]
-                    lbls_resize[it + n_context] = predlbls
+                    pred = lbls[0]
+                    lbls[t + n_context] = pred
 
                 if args.norm_mask:
                     # import pdb; pdb.set_trace()
-                    predlbls[:, :, :] -= predlbls.min(-1)[0][:, :, None]
-                    predlbls[:, :, :] /= predlbls.max(-1)[0][:, :, None]
+                    pred[:, :, :] -= pred.min(-1)[0][:, :, None]
+                    pred[:, :, :] /= pred.max(-1)[0][:, :, None]
 
                 _maps = []
 
                 if 'jhmdb' in args.filelist.lower():
-                    coords, predlbls_sharp = test_utils.process_pose(predlbls, lbl_set)
+                    coords, pred_sharp = test_utils.process_pose(pred, lbl_map)
                     keypts.append(coords)
-                    pose_map = utils.vis_pose(np.array(img_now).copy(), coords.numpy() * args.mapScale[..., None])
+                    pose_map = utils.vis_pose(np.array(cur_img).copy(), coords.numpy() * args.mapScale[..., None])
                     _maps += [pose_map]
-
 
                 # Save Predictions            
                 if 'VIP' in args.filelist:
-                    outpath = os.path.join(save_path, 'videos'+meta['img_paths'][it+n_context][0].split('videos')[-1])
+                    outpath = os.path.join(args.save_path, 'videos'+meta['img_paths'][t+n_context][0].split('videos')[-1])
                     os.makedirs(os.path.dirname(outpath), exist_ok=True)
                 else:
-                    outpath = os.path.join(save_path, str(batch_idx) + '_' + str(it))
+                    outpath = os.path.join(args.save_path, str(vid_idx) + '_' + str(t))
 
                 heatmap, lblmap, heatmap_prob = test_utils.dump_predictions(
-                    predlbls.cpu().numpy(),
-                    lbl_set, img_now, outpath)
+                    pred.cpu().numpy(),
+                    lbl_map, cur_img, outpath)
 
                 _maps += [heatmap, lblmap, heatmap_prob]
                 maps.append(_maps)
-                images.append(img_now)
 
                 if args.visdom:
                     [vis.image(np.uint8(_m).transpose(2, 0, 1)) for _m in _maps]
 
             if len(keypts) > 0:
                 # import pdb; pdb.set_trace()
-                coordpath = os.path.join(save_path, str(batch_idx) + '.dat')
+                coordpath = os.path.join(args.save_path, str(vid_idx) + '.dat')
                 np.stack(keypts, axis=-1).dump(coordpath)
 
             if args.visdom:
-                # wandb.log({'vid%s' % batch_idx: [wandb.Image(mm[0]) for mm in maps]})  
+                # wandb.log({'vid%s' % vid_idx: [wandb.Image(mm[0]) for mm in maps]})  
                 for m in maps:
-                    wandb.log({'blend vid%s' % batch_idx: wandb.Image(
+                    wandb.log({'blend vid%s' % vid_idx: wandb.Image(
                         m[0])})
 
-                # wandb.log({'blend vid%s' % batch_idx: wandb.Video(
+                # wandb.log({'blend vid%s' % vid_idx: wandb.Video(
                 # np.array([m[0] for m in maps]).transpose(0, -1, 1, 2), fps=12, format="gif")})  
                 
-                wandb.log({'prob vid%s' % batch_idx: wandb.Video(
+                wandb.log({'prob vid%s' % vid_idx: wandb.Video(
                     np.array([m[-1] for m in maps]).transpose(0, -1, 1, 2), fps=12, format="gif")})  
                 
-                wandb.log({'plain vid%s' % batch_idx: wandb.Video(
-                    np.array(images).transpose(0, -1, 1, 2), fps=12, format="gif")})  
+                wandb.log({'plain vid%s' % vid_idx: wandb.Video(
+                    img_orig.numpy(), fps=12, format="gif")})  
                 
             torch.cuda.empty_cache()
-            print('******* Vid %s TOOK %s *******' % (batch_idx, time.time() - t_vid))
+            print('******* Vid %s TOOK %s *******' % (vid_idx, time.time() - t_vid))
 
 
 if __name__ == '__main__':
-    main()
+    args = utils.arguments.test_args()
+
+    args.imgSize = args.cropSize
+
+    print('Context Length:', args.videoLen, 'Image Size:', args.imgSize)
+    print('Arguments', args)
+
+    vis = None
+    if args.visdom:
+        import visdom
+        import wandb
+        vis = visdom.Visdom(server=args.visdom_server, port=8095, env='main_davis_viz1'); vis.close()
+        wandb.init(project='palindromes', group='test_online')
+        vis.close()
+
+    main(args, vis)

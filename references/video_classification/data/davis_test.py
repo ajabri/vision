@@ -19,8 +19,6 @@ import scipy.misc
 import cv2
 from PIL import Image
 
-# get the video frames
-# two patches in the future frame, one is center, the other is one of the 8 patches around
 
 def to_numpy(tensor):
     if torch.is_tensor(tensor):
@@ -29,7 +27,6 @@ def to_numpy(tensor):
         raise ValueError("Cannot convert {} to numpy array"
                          .format(type(tensor)))
     return tensor
-
 
 def to_torch(ndarray):
     if type(ndarray).__module__ == 'numpy':
@@ -156,7 +153,7 @@ def hard_prop(predlbls, axis=-1):
 from matplotlib import cm
 
 class DavisSet(data.Dataset):
-    def __init__(self, args, is_train=True):
+    def __init__(self, args):
 
         self.filelist = args.filelist
         self.imgSize = args.imgSize
@@ -237,10 +234,6 @@ class DavisSet(data.Dataset):
             
             img = load_image(img_path)  # CxHxW
 
-            # if 'davis' in lbl_path:
-            #     lblimg = Image.open(lbl_path)
-            #     lblimg = np.array(lblimg, dtype=np.int32)[..., None]
-            # else:
             lblimg = cv2.imread(lbl_path)
 
             # print('loaded', i, time.time() - t00)
@@ -263,7 +256,7 @@ class DavisSet(data.Dataset):
                     neww = self.imgSize
 
                 if self.round:
-                    lblimg2  = cv2.resize(lblimg, (newh, neww), cv2.INTER_LINEAR)
+                    lblimg2 = cv2.resize(lblimg, (newh, neww), cv2.INTER_LINEAR)
                     lblimg = (((lblimg2 + 0) / 128).round() * 128).astype(lblimg.dtype)
                 else:
                     lblimg = cv2.resize(lblimg, (newh, neww), cv2.INTER_NEAREST)
@@ -312,13 +305,13 @@ class DavisSet(data.Dataset):
             rz_path = "%s_%s.npy" % (prefix, 'size%sx%s' % (rsz_h, rsz_w))
 
             onehot = try_np_load(oh_path) 
-            if onehot is None or True:
+            if onehot is None:# or True:
                 print('computing onehot lbl for', oh_path)
                 onehot = np.stack([np.all(lbls[i] == ll, axis=-1) for ll in lblset], axis=-1)
                 np.save(oh_path, onehot)
 
             resized = try_np_load(rz_path)
-            if resized is None or True:
+            if resized is None:# or True:
                 print('computing resized lbl for', rz_path)
                 resized = cv2.resize(np.float32(onehot), (rsz_w, rsz_h), cv2.INTER_LINEAR)
                 # import pdb; pdb.set_trace()
@@ -342,10 +335,6 @@ class DavisSet(data.Dataset):
                 resizes.append(resized)
                 onehots.append(onehot)
 
-            # import pdb; pdb.set_trace()
-
-            # print('frame', i, time.time() - t00)
-
         if self.texture:
             resizes = resizes * self.videoLen
             for _ in range(len(lbl_paths)-self.videoLen):
@@ -364,10 +353,8 @@ class DavisSet(data.Dataset):
 
         print('vid', i, 'took', time.time() - t000)
 
-        # import pdb; pdb.set_trace()
 
-        # return imgs, imgs_orig, lblset, lbls_tensor, lbls_onehot, lbls_resize, meta
-        return imgs, imgs_orig, lblset, lbls_tensor, lbls_resize, lbls_resize, meta
+        return imgs, imgs_orig, lbls_resize, lbls_tensor, lblset, meta
 
 
     def __len__(self):

@@ -155,17 +155,17 @@ def hard_prop(predlbls, axis=-1):
 from matplotlib import cm
 
 class JhmdbSet(data.Dataset):
-    def __init__(self, params, is_train=True, sigma=0.5):
+    def __init__(self, args, sigma=0.5):
 
         self.filelist = args.filelist
         self.imgSize = args.imgSize
         self.videoLen = args.videoLen
         self.mapScale = args.mapScale
 
-        self.sigma = sigma
-
         self.texture = args.texture
         self.round = args.round
+
+        self.sigma = sigma
 
         f = open(self.filelist, 'r')
         self.jpgfiles = []
@@ -308,76 +308,6 @@ class JhmdbSet(data.Dataset):
 
         # Meta info
         meta = dict(folder_path=folder_path, img_paths=img_paths, lbl_paths=[])
-
-
-        # ########################################################
-        # # Prepare reshaped label information
-        # lbls = np.stack(lbls)
-        # prefix = '/' + '/'.join(lbl_paths[0].split('.')[:-1])
-
-        # # Get lblset
-        # lblset_path = "%s_%s.npy" % (prefix, 'lblset')
-        # lblset = make_lbl_set(lbls)
-        # # lblset = try_np_load(lblset_path)
-        # # if lblset is None or True:
-        # #     print('making label set', lblset_path)
-        # #     lblset = make_lbl_set(lbls)
-        # #     np.save(lblset_path, lblset)
-
-        # # if len(lblset) != 20 or np.array(lblset).max() >= 20:
-        # #     import pdb; pdb.set_trace()
-
-        # onehots = []
-        # resizes = []
-
-        # for i,p in enumerate(lbl_paths):
-        #     prefix = '/' + '/'.join(p.split('.')[:-1])
-        #     # print(prefix)
-        #     oh_path = "%s_%s.npy" % (prefix, 'onehot')
-        #     rz_path = "%s_%s.npy" % (prefix, 'size%sx%s' % (rsz_h, rsz_w))
-
-        #     onehot = try_np_load(oh_path) 
-        #     if onehot is None:# or True:
-        #         print('computing onehot lbl for', oh_path)
-        #         onehot = np.stack([np.all(lbls[i] == ll, axis=-1) for ll in lblset], axis=-1)
-        #         np.save(oh_path, onehot)
-
-        #     resized = try_np_load(rz_path)
-        #     if resized is None:# or True:
-        #         print('computing resized lbl for', rz_path)
-        #         resized = cv2.resize(np.float32(onehot), (rsz_w, rsz_h), cv2.INTER_LINEAR)
-        #         # import pdb; pdb.set_trace()
-                
-        #         # NOTE give boost for color model_5, mainly for J score
-        #         # resized[:,:,0] -= 0.0001
-        #         # resized = hard_prop(resized)
-
-        #         # resized = np.round(resized)
-        #         # import pdb; pdb.set_trace()
-        #         # resized = onehot[::self.mapScale[0], ::self.mapScale[1]] * 1.0
-
-        #         np.save(rz_path, resized)
-
-        #     if self.texture:
-        #         texturized = texturize(resized)
-        #         resizes.append(texturized)
-        #         lblset = np.array([[0, 0, 0]] + [cm.Paired(i)[:3] for i in range(texturized.shape[-1])]) * 255.0
-        #         break
-        #     else:
-        #         resizes.append(resized)
-        #         onehots.append(onehot)
-
-        #     # import pdb; pdb.set_trace()
-
-        #     # print('frame', i, time.time() - t00)
-
-        # if self.texture:
-        #     resizes = resizes * self.videoLen
-        #     for _ in range(len(lbl_paths)-self.videoLen):
-        #         resizes.append(np.zeros(resizes[0].shape))
-        #     onehots = resizes
-
-        ########################################################
         
         imgs = torch.stack(imgs)
         imgs_orig = torch.stack(imgs_orig)
@@ -392,7 +322,7 @@ class JhmdbSet(data.Dataset):
         # import pdb; pdb.set_trace()
 
         # return imgs, imgs_orig, lblset, lbls_tensor, lbls_onehot, lbls_resize, meta
-        return imgs, imgs_orig, lblset, lbls_tensor, lbls_resize, lbls_resize, meta
+        return imgs, imgs_orig, lbls_resize, lbls_tensor, lblset, meta
 
 
     def __len__(self):

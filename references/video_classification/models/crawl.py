@@ -24,30 +24,6 @@ class Identity(nn.Module):
     def forward(self, x):
         return x
 
-def unfold_time(x, T):
-    return x.view(int(x.shape[0] / T), T, *x.shape[1:])
-
-def fold_time(x):
-    return x.view(x.shape[0] * x.shape[1], *x.shape[2:])
-
-class UnfoldTime(nn.Module):
-    def __init__(self, T):
-        super(UnfoldTime, self).__init__()
-        self.T = T
-    
-    def forward(self, x):
-        return x.view(int(x.shape[0] / self.T), self.T, *x.shape[1:])
-
-class FoldTime(nn.Module):
-    def __init__(self, T):
-        super(FoldTime, self).__init__()
-        self.T = T
-    
-    def forward(self, x):
-        return x.view(x.shape[0] * x.shape[1], *x.shape[2:])
-
-
-
 class CRaWl(nn.Module):
     def garg(self, k, d):
         return getattr(self.args, k) if hasattr(self.args, k) else d
@@ -79,7 +55,7 @@ class CRaWl(nn.Module):
             self.xent_weight = False
 
         print('Model temp:', self.temperature)
-        self.encoder = utils.make_encoder(args).to(args.device)
+        self.encoder = utils.make_encoder(args).to(self.args.device)
 
 
         self.infer_dims()
@@ -128,12 +104,15 @@ class CRaWl(nn.Module):
         if vis is not None:
             self._viz = vis
     
-        p_sz, stride = 64, 32
+        p_sz, stride = 64, 16
         self.k_patch =  nn.Sequential(
             K.RandomResizedCrop(size=(p_sz, p_sz), scale=(0.7, 0.9), ratio=(0.7, 1.3))
         )
+        # import pdb; pdb.set_trace()
         self.k_frame = nn.Sequential(
             # K.ColorJitter(0.1, 0.1, 0.1, 0),
+            # K.
+            # K.Normalize()
             K.RandomResizedCrop(size=(256, 256), scale=(0.8, 0.9), ratio=(0.7, 1.3))
         )
         # self.k_frame_same = nn.Sequential(
@@ -218,7 +197,7 @@ class CRaWl(nn.Module):
         return A * mask
 
     def dropout_mask(self, A):
-        return (torch.rand(A.shape) < self.dropout_rate).to(args.device)
+        return (torch.rand(A.shape) < self.dropout_rate).to(self.args.device)
 
     def compute_affinity(self, x1, x2, do_dropout=True, zero_diagonal=None):
         B, C, N = x1.shape
