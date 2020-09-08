@@ -30,7 +30,54 @@ sys.excepthook = info
 #########################################################
 # Misc
 #########################################################
+import collections
+import math
 
+
+class RunningStats:
+    def __init__(self, WIN_SIZE=20):
+        self.n = 0
+        self.mean = 0
+        self.run_var = 0
+        self.WIN_SIZE = WIN_SIZE
+
+        self.windows = collections.deque(maxlen=WIN_SIZE)
+
+    def clear(self):
+        self.n = 0
+        self.windows.clear()
+
+    def push(self, x):
+
+        self.windows.append(x)
+
+        if self.n <= self.WIN_SIZE:
+            # Calculating first variance
+            self.n += 1
+            delta = x - self.mean
+            self.mean += delta / self.n
+            self.run_var += delta * (x - self.mean)
+        else:
+            # Adjusting variance
+            x_removed = self.windows.popleft()
+            old_m = self.mean
+            self.mean += (x - x_removed) / self.WIN_SIZE
+            self.run_var += (x + x_removed - old_m - self.mean) * (x - x_removed)
+
+    def get_mean(self):
+        return self.mean if self.n else 0.0
+
+    def get_var(self):
+        return self.run_var / (self.WIN_SIZE - 1) if self.n > 1 else 0.0
+
+    def get_std(self):
+        return math.sqrt(self.get_var())
+
+    def get_all(self):
+        return list(self.windows)
+
+    def __str__(self):
+        return "Current window values: {}".format(list(self.windows))
 
 #########################################################
 # Meters
@@ -653,8 +700,12 @@ class PatchGraph(object):
         # import pdb; pdb.set_trace()
 
 
+
+import wandb
+
 class Visualize(object):
     def __init__(self, args, suffix='metrics', log_interval=2*60):
+
         self._env_name = "%s-%s" % (args.name, suffix)
         self.vis = visdom.Visdom(
             port=args.port,
@@ -665,8 +716,17 @@ class Visualize(object):
 
         self.log_interval = log_interval
         self._last_flush = time.time()
+        self._init = False
 
-    def log(self, key, value):
+    def wandb_init(self):
+        if not self._init:
+            self._init = True
+            wandb.init(project="palindromes", group="stats")
+
+    def log(self, key_vals):
+        return wandb.log(key_vals)
+
+    def log2(self, key, value):
         if not key in self.data:
             self.data[key] = [[],[]]
 
@@ -687,12 +747,14 @@ class Visualize(object):
                     opts=dict( title=k )
                 )
             self._last_flush = time.time()
-
+            if np.random.random() < 0.1:
+                self.save()
+            
     def nn_patches(self, P, A_k, prefix='', N=10, K=20):
         nn_patches(self.vis, P, A_k, prefix, N, K)
 
     def save(self):
-        self.vis.save(self._env_name)
+        self.vis.save([self._env_name])
 
 def get_stride(im_sz, p_sz, res):
     stride = (im_sz - p_sz)//(res-1)
@@ -781,6 +843,7 @@ def patch_grid(x, transform, shape=(64, 64, 3), stride=[1.0, 1.0]):
 
     return torch.cat(P, dim=0)
 
+# def 
 
 def get_frame_aug(args):
     train_transform = []
@@ -847,7 +910,14 @@ def get_frame_transform(args):
     else:
         tt.append(norm_size)
 
-    if 'cj' in fts:
+    if 'cj2' in fts:
+        _cj = 0.2
+        tt += [
+            transforms.RandomGrayscale(p=0.2),
+            transforms.ColorJitter(_cj, _cj, _cj, _cj),
+        ]
+
+    elif 'cj' in fts:
         _cj = 0.1
         tt += [
             #transforms.RandomGrayscale(p=0.2),
@@ -1128,6 +1198,14 @@ class From3D(nn.Module):
 
         return mm.view(N, T, *mm.shape[-3:]).permute(0, 2, 1, 3, 4)
 
+class Identity(nn.Module):
+    def __init__(self, size):
+        super(Identity, self).__init__()
+        self.size = size
+    
+    def forward(self, x):
+        return x
+
 
 def load_vince_model(path):
     checkpoint = torch.load(path, map_location={'cuda:0': 'cpu'})
@@ -1142,17 +1220,68 @@ def make_encoder(args):
     model_type = args.model_type
 
     if model_type == 'scratch':
-        import torchvision.models.video.resnet as _resnet3d
         # resnet = resnet3d.r2d_10(pretrained=False)
 
         # resnet = aa_resnet.resnet18(pretrained=False)
-        # norm_layer=lambda x: nn.GroupNorm(1, x)
+        norm_layer=lambda x: nn.GroupNorm(1, x)
         # resnet = resnet2d.resnet34(pretrained=False,)        
 
         resnet = resnet2d.resnet18(pretrained=False)#, norm_layer=norm_layer)
 
         if args.no_maxpool:
             resnet.maxpool = None
+
+    elif model_type == 'scratch_deep':
+        # resnet = resnet3d.r2d_10(pretrained=False)
+
+        # resnet = aa_resnet.resnet18(pretrained=False)
+        # norm_layer=lambda x: nn.GroupNorm(1, x)
+        # resnet = resnet2d.resnet34(pretrained=False,)        
+
+        resnet = resnet2d.resnet50(pretrained=False)#, norm_layer=norm_layer)
+
+        if args.no_maxpool:
+            resnet.maxpool = None
+
+    elif model_type == 'scratch_shallow':
+        # resnet = resnet3d.r2d_10(pretrained=False)
+
+        # resnet = aa_resnet.resnet18(pretrained=False)
+        # norm_layer=lambda x: nn.GroupNorm(1, x)
+        # resnet = resnet2d.resnet34(pretrained=False,)        
+
+        resnet = resnet2d.thinnet(pretrained=False)#, norm_layer=norm_layer)
+
+        # if args.no_maxpool:
+        resnet.maxpool = None
+
+
+    elif model_type == 'scratch_light':
+        # resnet = resnet3d.r2d_10(pretrained=False)
+
+        # resnet = aa_resnet.resnet18(pretrained=False)
+        # norm_layer=lambda x: nn.GroupNorm(1, x)
+        # resnet = resnet2d.resnet34(pretrained=False,)        
+        import batch_renorm as brn
+        norm_layer = brn.BatchRenormalization2D
+        
+        resnet = resnet2d.thinnet_nopad(pretrained=False, norm_layer=norm_layer)
+
+        if args.no_maxpool:
+            resnet.maxpool = None
+
+    elif model_type == 'scratch_light2':
+        # resnet = resnet3d.r2d_10(pretrained=False)
+
+        # resnet = aa_resnet.resnet18(pretrained=False)
+        # norm_layer=lambda x: nn.GroupNorm(1, x)
+        # resnet = resnet2d.resnet34(pretrained=False,)        
+
+        resnet = resnet2d.thinnet2_nopad(pretrained=False)#, norm_layer=norm_layer)
+
+        if args.no_maxpool:
+            resnet.maxpool = None
+
     elif 'vince_weights' in model_type:
         checkpoint = load_vince_model(model_type)
         resnet2d._REFLECT_PAD = False
@@ -1165,7 +1294,12 @@ def make_encoder(args):
         
     elif model_type == 'bagnet':
         import bagnet
-        resnet = bagnet.bagnet33(pretrained=True)
+        import batch_renorm as brn
+
+        norm_layer = brn.BatchRenormalization2D
+        # norm_layer = Identity
+
+        resnet = bagnet.bagnet17(pretrained=False, norm_layer=norm_layer)
         
     elif model_type == 'imagenet':
         resnet2d._REFLECT_PAD = False
@@ -1179,10 +1313,16 @@ def make_encoder(args):
         # self.resnet = _resnet3d.r3d_18(pretrained=True)
         # self.resnet = resnet3d.r2d_18(pretrained=True)
 
-
     resnet.fc, resnet.avgpool, = None, None
+
     if not args.use_res4:
         resnet.layer4 = None
+
+    if args.skip_res3:
+        resnet.layer3 = None
+
+    if args.skip_res2:
+        resnet.layer2 = None
 
     if 'Conv2d' in str(resnet):
         resnet = From3D(resnet)
@@ -1323,48 +1463,6 @@ class RestrictAttention(nn.Module):
 # class Patchifier(nn.Module):
 #     def __init__
 
-class Colorizer(nn.Module):
-    def __init__(self, D, R, C=16):
-        super(Colorizer, self).__init__()
-        self.D = 4
-        self.R = 6  # window size
-        self.C = 16
-        self.P = self.R * 2 + 1
-
-        self.correlation_sampler = SpatialCorrelationSampler(
-            kernel_size=1,
-            patch_size=self.P,
-            stride=1,
-            padding=0,
-            dilation=1)
-
-    def prep(self, image):
-        _,c,_,_ = image.size()
-        x = F.interpolate(image.float(), scale_factor=(1/self.D), mode='bilinear')
-        if c == 1:
-            x = one_hot(x.long(), self.C)
-        return x
-
-    def forward(self, feats_r, feats_t, quantized_r):
-        b,c,h,w = quantized_r.size()
-
-        r = self.prep(quantized_r)
-        r = F.pad(r, (self.R,self.R,self.R,self.R), mode='replicate')
-
-        corr = self.correlation_sampler(feats_t, feats_r)
-        _,_,_,h1,w1 = corr.size()
-
-        corr[corr == 0] = -1e10  # discount padding at edge for softmax
-        corr = corr.reshape([b, self.P*self.P, h1*w1])
-        corr = F.softmax(corr, dim=1)
-        corr = corr.unsqueeze(1)
-
-        image_uf = F.unfold(r, kernel_size=self.P)
-        image_uf = image_uf.reshape([b,self.C,self.P*self.P,h1*w1])
-
-        out = (corr * image_uf).sum(2).reshape([b,self.C,h1,w1])
-
-        return out
 
 ###############################################################################
 

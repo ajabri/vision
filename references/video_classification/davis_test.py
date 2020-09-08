@@ -311,13 +311,13 @@ class DavisSet(data.Dataset):
             rz_path = "%s_%s.npy" % (prefix, 'size%sx%s' % (rsz_h, rsz_w))
 
             onehot = try_np_load(oh_path) 
-            if onehot is None or True:
+            if onehot is None:#: or True:
                 print('computing onehot lbl for', oh_path)
                 onehot = np.stack([np.all(lbls[i] == ll, axis=-1) for ll in lblset], axis=-1)
                 np.save(oh_path, onehot)
 
             resized = try_np_load(rz_path)
-            if resized is None or True:
+            if resized is None:# or True:
                 print('computing resized lbl for', rz_path)
                 resized = cv2.resize(np.float32(onehot), (rsz_w, rsz_h), cv2.INTER_LINEAR)
                 # import pdb; pdb.set_trace()

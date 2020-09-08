@@ -2,13 +2,28 @@ import os
 import yaml
 import socket
 
-def test(model, L=5, K=2, T=0.01, opts=[], gpu=0, force=False):
+def test(model, L=5, K=2, T=0.01, R=12, opts=[], gpu=0, force=False):
     #--radius 40  --all-nn 
     # MODEL=moco
 
     # MODEL=
     # MODEL="--resume ${MODEL}"
     # model="--model-type imagenet"
+
+    R = int(R)
+
+    if '---' in model:
+        model_split = model.split('---')
+        model = model_split[0]
+        model_flags = model_split[1].split(',')
+
+        if 'noallnn' in model_flags:
+            opts.remove('--all-nn')
+            model_flags.remove('noallnn')
+
+        opts += ['--%s' % flag for flag in model_flags]
+
+        # exit()
 
     if os.path.exists(model) and 'vince_weights' not in model:
         model_str = "--model-type scratch --resume %s" % model
@@ -36,10 +51,13 @@ def test(model, L=5, K=2, T=0.01, opts=[], gpu=0, force=False):
         davis2017path = '/data/yusun/ajabri/davis-2017/'
 
     # model_name = "hardprop_fixedtemp_truerenorm_all_L%s_K%s_T%s_opts%s_M%s" %(L, K, T, ''.join(opts), model_name) 
-    model_name = "fix_IN_L%s_K%s_T%s_opts%s_M%s" %(L, K, T, ''.join(opts), model_name) 
+    model_name = "fix_IN_L%s_K%s_T%s_R%s_opts%s_M%s" %(L, K, T, R, ''.join(opts), model_name) 
 
     if 'nopool' in model_name:
         opts += ['--no-maxpool']
+
+    # opts += ['--skip-res3']
+    # opts += ['--skip-res2']
 
     # if 'res4' in model_name or '425-noxw' in model_name: # or 'vince' in model_name:
     #     # if not 'res4-nocj-noblur' in model_name: # or True:
@@ -60,8 +78,8 @@ def test(model, L=5, K=2, T=0.01, opts=[], gpu=0, force=False):
         if (not os.path.isdir(f"{outdir}/results_{model_name}")) or force:# or True:
             cmd += f'''
                 python test_mem{online_str}.py --filelist {datapath}/vallist.txt {model_str} \
-                    --topk_vis {K}   --videoLen {L} --temperature {T} --save-path {outdir}/results_{model_name} \
-                    --workers 5  {opts} --gpu-id {gpu} && \
+                    --topk_vis {K} --radius {R}  --videoLen {L} --temperature {T} --save-path {outdir}/results_{model_name} \
+                    --workers 3  {opts} --gpu-id {gpu} && \
                 '''
                 #.format(model_str=model_str, model_name=model_name, K=K, L=L, T=T, gpu=gpu, outdir=outdir, opts=opts)
 
@@ -80,7 +98,7 @@ def test(model, L=5, K=2, T=0.01, opts=[], gpu=0, force=False):
     return yaml.load(open(outfile))['dataset']
 
 
-def sweep(models, L, K, T, size, finetune, multiprocess=False, slurm=False, force=False, gpu=-1):
+def sweep(models, L, K, T, R, size, finetune, multiprocess=False, slurm=False, force=False, gpu=-1):
     import itertools
 
     # opts = [['--head-depth', str(-1)]] #['--radius', str(10)], ['--radius', str(5)], ['--radius', str(2.5)]] #, ['--all-nn']]
@@ -97,10 +115,10 @@ def sweep(models, L, K, T, size, finetune, multiprocess=False, slurm=False, forc
 
     # opts = [base_opts + ['--radius', str(10)], base_opts + ['--radius', str(40)], base_opts + ['--radius', str(5)]]
     # opts = [base_opts + ['--radius', str(10), '--long-mem','0', '5', '10']] #, base_opts + ['--radius', str(5)]]
-    opts = [base_opts + ['--radius', str(12)]]#, '--long-mem','0', ]] #, base_opts + ['--radius', str(5)]]
+    opts = [base_opts]# + ['--radius', str(12)]]#, '--long-mem','0', ]] #, base_opts + ['--radius', str(5)]]
     # opts = [base_opts + ['--radius', str(10)]] #, base_opts + ['--radius', str(5)]]
 
-    prod = list(itertools.product(models, L, K, T, opts))
+    prod = list(itertools.product(models, L, K, T, R, opts))
 
     if multiprocess:
         import multiprocessing
@@ -122,7 +140,7 @@ def sweep(models, L, K, T, size, finetune, multiprocess=False, slurm=False, forc
     elif slurm:
         for p in prod:
 
-            cmd = f"sbatch --export=model_path={p[0]},L={p[1]},K={p[2]},T={p[3]},size={size},finetune={finetune} /home/ajabri/slurm/davis_test.sh"
+            cmd = f"sbatch --export=model_path={p[0]},L={p[1]},K={p[2]},T={p[3]},R={p[4]},size={size},finetune={finetune} /home/ajabri/slurm/davis_test.sh"
             print(cmd)
 
             os.system(cmd)
@@ -190,6 +208,7 @@ if __name__ == '__main__':
     parser.add_argument('--L', default=[3], type=int, nargs='+')
     parser.add_argument('--K', default=[2], type=int, nargs='+')
     parser.add_argument('--T', default=[0.1], type=float, nargs='+')
+    parser.add_argument('--R', default=[12], type=float, nargs='+')
     parser.add_argument('--finetune', default=0, type=int)
 
     parser.add_argument('--cropSize', default=480, type=int)
@@ -201,12 +220,12 @@ if __name__ == '__main__':
         args.model_path = models
 
     if args.slurm:
-        sweep(args.model_path, args.L, args.K, args.T, args.cropSize, args.finetune,
+        sweep(args.model_path, args.L, args.K, args.T, args.R, args.cropSize, args.finetune,
             slurm=args.slurm,
             force=args.force)
         
     else:
-        sweep(args.model_path, args.L, args.K, args.T, args.cropSize, args.finetune,
+        sweep(args.model_path, args.L, args.K, args.T, args.R, args.cropSize, args.finetune,
             multiprocess=args.multiprocess,
             force=args.force,
             gpu=args.gpu)

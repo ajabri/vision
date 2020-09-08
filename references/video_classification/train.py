@@ -14,6 +14,8 @@ from kinetics import Kinetics400
 from video_folder import VideoList
 
 import utils
+import data
+
 from sampler import DistributedSampler, UniformClipSampler, RandomClipSampler
 from scheduler import WarmupMultiStepLR
 import transforms as T
@@ -319,11 +321,12 @@ def train_one_epoch(model, criterion, optimizer, lr_scheduler, data_loader, devi
         loss = (xent_loss.mean() + kldv_loss.mean())
         # print(xent_loss, kldv_loss, loss)
 
-        if vis is not None and np.random.random() < 0.01:
-            vis.log('xent_loss', xent_loss.mean().item())
-            vis.log('kldv_loss', kldv_loss.mean().item())
+        if vis is not None and np.random.random() < 0.05:
+            vis.wandb_init()
+            vis.log(dict(xent_loss=xent_loss.mean().item()))
+            vis.log(dict(kldv_loss=kldv_loss.mean().item()))
             for k,v in diagnostics.items():
-                vis.log(k, v.mean().item())
+                vis.log({k:v.mean().item()})
 
         if checkpoint_fn is not None and np.random.random() < 0.005:
             checkpoint_fn()
@@ -487,7 +490,7 @@ def main(args):
     data_loader_64 = torch.utils.data.DataLoader(
         dataset, batch_size=args.batch_size, # shuffle=not args.fast_test,
         sampler=train_sampler, num_workers=args.workers//2,
-        pin_memory=True, collate_fn=collate_fn)
+        pin_memory=False, collate_fn=collate_fn)
 
     # 128px
     # args.patch_size = (128, 128, 3)
@@ -735,6 +738,20 @@ def parse_args():
     parser.add_argument('--no-maxpool', default=False, action='store_true',
         help='')
     parser.add_argument('--use-res4', default=False, action='store_true',
+        help='')
+    parser.add_argument('--skip-res3', default=False, action='store_true',
+        help='')
+    parser.add_argument('--skip-res2', default=False, action='store_true',
+        help='')
+
+    # sinkhorn-knopp ideas
+    parser.add_argument('--sk-align', default=False, action='store_true',
+        help='')
+
+    parser.add_argument('--sk-targets', default=False, action='store_true',
+        help='')
+
+    parser.add_argument('--random-resize', default=[256, 256], nargs=2, type=int,
         help='')
 
     args = parser.parse_args()

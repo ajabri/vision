@@ -16,7 +16,6 @@ import scipy.misc
 import skimage
 import skimage.io
 
-
 import torch
 import torch.nn as nn
 import torch.backends.cudnn as cudnn
@@ -33,14 +32,6 @@ from torch.autograd import Variable
 
 params = {}
 
-
-def str_to_bool(v):
-    if v.lower() in ('yes', 'true', 't', 'y', '1'):
-        return True
-    elif v.lower() in ('no', 'false', 'f', 'n', '0'):
-        return False
-    else:
-        raise argparse.ArgumentTypeError('Boolean value expected.')
 
 
 # Parse arguments
@@ -88,7 +79,11 @@ parser.add_argument('--head-depth', default=0, type=int,
                     help='')
 
 parser.add_argument('--no-maxpool', default=False, action='store_true', help='')
+
 parser.add_argument('--use-res4', default=False, action='store_true', help='')
+parser.add_argument('--skip-res3', default=False, action='store_true', help='')
+parser.add_argument('--skip-res2', default=False, action='store_true', help='')
+
 parser.add_argument('--no-l2', default=False, action='store_true', help='')
 
 parser.add_argument('--long-mem', default=[0], type=int, nargs='*', help='')
@@ -155,9 +150,7 @@ def main():
     global best_loss
     start_epoch = 0  # start from epoch 0 or last checkpoint epoch
     
-    model = tc.TimeCycle(
-        args
-    ).cuda()
+    model = tc.TimeCycle(args).cuda()
     model = Wrap(model)
     
     params['mapScale'] = model(torch.zeros(1, 10, 3, 320, 320).cuda(), None, True, func='forward')[1].shape[-2:]
@@ -168,7 +161,6 @@ def main():
             jhmdb.JhmdbSet(params, is_train=False),
         batch_size=int(params['batchSize']), shuffle=False,
         num_workers=args.workers, pin_memory=True)
-
 
     cudnn.benchmark = False
     print('    Total params: %.2fM' % (sum(p.numel() for p in model.parameters())/1000000.0))
@@ -420,13 +412,17 @@ def test(val_loader, model, epoch, use_cuda):
                 weights, ids = torch.topk(A, args.topk_vis, dim=-2)
                 weights = torch.nn.functional.softmax(weights, dim=-2)
                 
+                # import pdb; pdb.set_trace()
+
                 w_s.append(weights.cpu())
                 i_s.append(ids.cpu())
 
             # import pdb; pdb.set_trace()
 
-            weights = torch.cat(w_s, dim=-1)
-            ids = torch.cat(i_s, dim=-1)
+            if pbsize < keys.shape[-1]:
+                weights = torch.cat(w_s, dim=-1)
+                ids = torch.cat(i_s, dim=-1)
+
             Ws += [w for w in weights]
             Is += [ii for ii in ids]
 
@@ -476,6 +472,7 @@ def test(val_loader, model, epoch, use_cuda):
                 predlbls[:, :, :] -= predlbls.min(-1)[0][:, :, None]
                 predlbls[:, :, :] /= predlbls.max(-1)[0][:, :, None]
 
+
             _maps = []
 
             if 'jhmdb' in args.filelist.lower():
@@ -483,7 +480,6 @@ def test(val_loader, model, epoch, use_cuda):
                 keypts.append(coords)
                 pose_map = utils.vis_pose(np.array(img_now).copy(), coords.numpy() * params['mapScale'][..., None])
                 _maps += [pose_map]
-
 
             # Save Predictions            
             if 'VIP' in args.filelist:

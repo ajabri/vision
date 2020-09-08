@@ -16,9 +16,24 @@ import utils
 
 import kornia
 import kornia.augmentation as K
+import kornia.geometry as K_geo
 
 from matplotlib import cm
 color = cm.get_cmap('winter')
+
+
+'''
+TODO
+
+Look at variance of sum over incoming probabilities per node...
+This should show examples of large motions
+
+Maybe dropout 0.0 with fps2 is ok
+'''
+
+
+import math
+
 
 class Identity(nn.Module):
     def __init__(self, *args, **kwargs):
@@ -72,6 +87,12 @@ class TimeCycle(nn.Module):
         else:
             self.kldv_coef = 0
             self.xent_coef = 0
+            self.long_coef = 1
+            self.skip_coef = 0
+
+            # self.sk_align = False
+            # self.sk_targets = True
+            
             self.zero_diagonal = 0
             self.dropout_rate = 0
             self.featdrop_rate = 0
@@ -136,21 +157,32 @@ class TimeCycle(nn.Module):
         self.k_patch =  nn.Sequential(
             K.RandomResizedCrop(size=(p_sz, p_sz), scale=(0.7, 0.9), ratio=(0.7, 1.3))
         )
+
+        mmm, sss = torch.Tensor([0.485, 0.456, 0.406]), torch.Tensor([0.229, 0.224, 0.225])
+
         self.k_frame = nn.Sequential(
+            # kornia.color.Normalize(mean=-mmm/sss, std=1/sss),
             # K.ColorJitter(0.1, 0.1, 0.1, 0),
-            K.RandomResizedCrop(size=(256, 256), scale=(0.8, 0.9), ratio=(0.7, 1.3))
+            # K.RandomResizedCrop(size=(256, 256), scale=(0.8, 0.9), ratio=(0.7, 1.3)),
+            # kornia.color.Normalize(mean=mmm, std=sss)
         )
+        
         # self.k_frame_same = nn.Sequential(
         #     K.RandomResizedCrop(size=(256, 256), scale=(0.8, 1.0), same_on_batch=True)
         # )
         # self.k_frame_same = None
+        
         self.k_frame_same = nn.Sequential(
             kornia.geometry.transform.Resize(256 + 20),
-            kornia.augmentation.RandomCrop((256, 256), same_on_batch=True),
+            K.RandomHorizontalFlip(same_on_batch=True),
+            K.RandomCrop((256, 256), same_on_batch=True),
         )
 
         self.unfold = torch.nn.Unfold((p_sz,p_sz), dilation=1, padding=0, stride=(stride, stride))
 
+        self.ent_stats = utils.RunningStats(1000)
+
+        # self.selfattn = nn.TransformerEncoderLayer(128, nhead=1, dim_feedforward=self.enc_hid_dim)
 
     def infer_dims(self):
         # if '2D' in str(type(self.encoder.conv1)):
@@ -271,7 +303,26 @@ class TimeCycle(nn.Module):
 
         return A #, AA, log_AA, A1, A2
     
-    def stoch_mat(self, A, zero_diagonal=True, do_dropout=True):
+    def sinkhorn_mat(self, A, tol=0.01, max_iter=1000, verbose=False):
+        _iter = 0
+        A1=A2=A    
+        
+        A = A / A.sum(-1).sum(-1)[:, None, None]
+
+        while A2.sum(-2).std() > tol and _iter < max_iter:
+            A1 = F.normalize(A2, p=1, dim=-2)
+            A2 = F.normalize(A1, p=1, dim=-1)
+
+            _iter += 1
+            if verbose:
+                print('row/col sums', A2.sum(-1).std().item(), A2.sum(-2).std().item())
+
+        if verbose:
+            print('------------row/col sums aft', A.sum(-1).std().item(), A.sum(-2).std().item())
+
+        return A2 
+
+    def stoch_mat(self, A, zero_diagonal=True, do_dropout=True, do_sinkhorn=False):
         '''
             Affinity -> Stochastic Matrix
         '''
@@ -284,16 +335,30 @@ class TimeCycle(nn.Module):
             # A = A.clone()
             A[mask] = -1e20
 
-        if self.edge == 'softmax':
-            # import pdb; pdb.set_trace()
-            A = F.softmax(A/self.temperature, dim=-1)
-            # A = F.normalize(A - A.min(-1)[0][..., None] + 1e-20, dim=-1, p=1)
-        else:
-            if not hasattr(self, 'graph_bias'):
-                self.graph_bias = nn.Parameter((torch.ones(*A.shape[-2:])) * 1e-2).to(next(self.encoder.parameters()).device)
-            A = F.normalize(F.relu(A + self.graph_bias)**2, dim=-1, p=1)
+        # import pdb; pdb.set_trace()
 
-        ## TODO TOP K
+        if do_sinkhorn:
+            # import pdb; pdb.set_trace()
+            A = (A/self.temperature).exp()
+            # import time
+            # t0 = time.time()
+            # with torch.no_grad():
+            A = self.sinkhorn_mat(A, tol=0.01, max_iter=100, verbose=False)
+    
+            # t1 = time.time()
+            # print( 'sinkhorn took', t1-t0)
+            ## TODO TOP K
+
+        else:
+            if self.edge == 'softmax':
+                # import pdb; pdb.set_trace()
+                A = F.softmax(A/self.temperature, dim=-1)
+                # A = F.softmax(A, dim=-1)
+                # A = F.normalize(A - A.min(-1)[0][..., None] + 1e-20, dim=-1, p=1)
+            elif self.edge == 'graph_edge':
+                if not hasattr(self, 'graph_bias'):
+                    self.graph_bias = nn.Parameter((torch.ones(*A.shape[-2:])) * 1e-2).to(next(self.encoder.parameters()).device)
+                A = F.normalize(F.relu(A + self.graph_bias)**2, dim=-1, p=1)
 
         return A
 
@@ -306,11 +371,19 @@ class TimeCycle(nn.Module):
         B, N, C, T, h, w = x.shape
         x = x.reshape(B*N, C, T, h, w) 
 
+        rand_resize = self.garg('random_resize', False)
+        if rand_resize and np.random.random() > 0.5 and (rand_resize[1] - rand_resize[0]) > 0:
+            x = x.flatten(1,2)
+            _rand_size = np.random.randint(rand_resize[0], rand_resize[1])
+            x = torch.nn.functional.interpolate(x, size=(_rand_size, _rand_size), mode='bilinear', align_corners=False)
+            x = x.view(B*N, C, T, x.shape[-2], x.shape[-1])
+
         mm = self.encoder(x)
 
         # HACK: Attempted spatial dropout when trying to hack dense feature setting
-        # _mm = torch.flatten(mm.transpose(1,2), start_dim=0, end_dim=1)
-        # mm = nn.functional.dropout2d(_mm, p=self.featdrop_rate).view(B, T, *_mm.shape[1:]).transpose(1, 2)
+        # import pdb; pdb.set_trace()
+        _mm = torch.flatten(mm.transpose(1,2), start_dim=0, end_dim=1)
+        mm = nn.functional.dropout2d(_mm, p=self.featdrop_rate).view(B*N, T, *_mm.shape[1:]).transpose(1, 2)
 
         H, W = mm.shape[-2:]
 
@@ -351,7 +424,78 @@ class TimeCycle(nn.Module):
         xent_weight = torch.clamp(xent_weight, min=0, max=5)
         return xent_weight
 
+    def loss_mask2(self, A, P, k=10):
+        '''
+            P is row-normalized, process stochastic matrix of affinity A
+        '''
+        entropy = (-P * torch.log(P)).sum(-1) #/ np.log(P.shape[-1])
+        # maxsim = A.max(-1)[0]
+        # maxsim = A.topk(k=2, dim=-1)[0][..., -1]
+        # xent_weight = 1 / (maxsim * entropy)
+
+
+        idxs = (-P * torch.log(P)).sum(-1).topk(k=10, dim=-1, largest=False)[1]
+
+        # ones = torch.ones(P.shape[:-1])
+
+        weights = torch.zeros(P.shape[:-1]).cuda().scatter_(1, idxs, 1)
+        # xent_weight = torch.clamp(xent_weight, min=0, max=5)
+
         # import pdb; pdb.set_trace()
+
+        return weights
+
+        # import pdb; pdb.set_trace()
+
+    def patchify_video(self, x):
+        # x = torch.randn(1, 500, 500, 500)  # batch, c, h, w
+        # kc, kh, kw = 64, 64, 64  # kernel size
+        # dc, dh, dw = 64, 64, 64  # stride
+        # patches = x.unfold(1, kc, dc).unfold(2, kh, dh).unfold(3, kw, dw)
+        # unfold_shape = patches.size()
+        # patches = patches.contiguous().view(patches.size(0), -1, kc, kh, kw)
+        # print(patches.shape)
+        
+        B, T, C, H, W = x.shape
+        _N, C = C//3, 3
+
+        _sz = self.unfold.kernel_size[0]
+        x = x.flatten(0, 1)
+
+        import pdb; pdb.set_trace()
+        x = self.k_frame_same(x)
+        x = self.k_frame(x)
+
+        x.unfold(1, 2, 2).unfold(3, 64, 32).unfold(4, 64, 32)
+
+    def patchify(self, x):
+        B, T, C, H, W = x.shape
+        _N, C = C//3, 3
+
+        # patchify with unfold
+        
+        # _sz, res = 80, 10
+        # stride = utils.get_stride(H, _sz, res)
+        _sz = self.unfold.kernel_size[0]
+        x = x.flatten(0, 1)
+
+        # if self.k_frame_same is None:
+        #     import pdb; pdb.set_trace()
+
+        x = self.k_frame_same(x)
+        x = self.k_frame(x)
+        x = self.unfold(x)
+
+        # import pdb; pdb.set_trace()
+
+        x, _N = x.view(B, T, C, _sz, _sz, x.shape[-1]), x.shape[-1]
+        x = x.permute(0, -1, 1, 2, 3, 4)   # B x _N x T x C x H x W
+        x = x.flatten(0, 2)
+
+        x = self.k_patch(x)
+        x = x.view(B, _N, T, C, _sz, _sz).transpose(2, 3)
+
+        return x
 
     def forward(self, x, orig=None, just_feats=False, visualize=False, targets=None, unfold=False):
         # x = x.cpu() * 0 + torch.randn(x.shape)
@@ -368,39 +512,27 @@ class TimeCycle(nn.Module):
         _N, C = C//3, 3
 
         # x = F.dropout(x)
-    
+
+        # unfold = True
+        # import pdb; pdb.set_trace()
+
         if _N == 1 and (visualize and False or unfold):
-            # patchify with unfold
-            # _sz, res = 80, 10
-            # stride = utils.get_stride(H, _sz, res)
-            _sz = self.unfold.kernel_size[0]
-            x = x.flatten(0, 1)
-
-            # if self.k_frame_same is None:
-            #     import pdb; pdb.set_trace()
-
-            x = self.k_frame_same(x)
-            x = self.k_frame(x)
-            x = self.unfold(x)
-
-            x, _N = x.view(B, T, C, _sz, _sz, x.shape[-1]), x.shape[-1]
-            x = x.permute(0, -1, 1, 2, 3, 4)   # B x _N x T x C x H x W
-            x = x.flatten(0, 2)
-
-            x = self.k_patch(x)
-            x = x.view(B, _N, T, C, _sz, _sz).transpose(2, 3)
-            # import pdb; pdb.set_trace()
+            x = self.patchify(x)
             x = x.cuda()
         else:
             # import pdb; pdb.set_trace()
             x = x.transpose(1,2).view(B, _N, C, T, H, W)
+
+        # import pdb; pdb.set_trace()
 
         if self.shuffle > np.random.random():
             shuffle = torch.randperm(B*_N)
             x = x.reshape(B*_N, C, T, H, W)[shuffle]
             x = x.view(B, _N, C, T, H, W)
             
+        # import pdb; pdb.set_trace()
         ff, mm = self.pixels_to_nodes(x)
+        
 
         # _ff = ff.view(*ff.shape[:-1], h, w)
         if just_feats:
@@ -410,7 +542,13 @@ class TimeCycle(nn.Module):
             else:
                 return ff, ff.view(*ff.shape[:-1], h, w)
 
+        
         B, C, T, N = ff.shape
+
+        # ff = ff.permute(0,2,3, 1).flatten(0,1)
+        # ff = self.selfattn(ff)
+        # ff = ff.view(B, T, N, C).permute(0, 3, 1, 2)
+        # ff = F.normalize(ff, dim=1)
 
         A12s = []
         A21s = []
@@ -457,15 +595,25 @@ class TimeCycle(nn.Module):
         # Build all graph once!
         #################################################################
 
+        # import pdb; pdb.set_trace()
+
+        # _A = torch.einsum('bctn,bctm->btnm', ff[:, :, :-1], ff[:, :, 1:])
+
         if len(t_pairs) > 0:
             for (t1, t2) in t_pairs:
                 f1, f2 = ff[:, :, t1], ff[:, :, t2]
 
+                # A = _A[:, t1]
                 A = self.compute_affinity(f1, f2)
-                A1, A2 = self.stoch_mat(A), self.stoch_mat(A.transpose(-1, -2))
-                AA = A1 @ A2
+
+                # do_dropout = True
+                do_dropout = False if (t1 == 0 or t2 == T-1) else True
+
+                A1 = self.stoch_mat(A, do_sinkhorn=self.garg('sk_align', False), do_dropout=do_dropout)
+                A2 = self.stoch_mat(A.transpose(-1, -2), do_sinkhorn=self.garg('sk_align', False), do_dropout=do_dropout)
 
                 if self.garg('skip_coef', 0) > 0:
+                    AA = A1 @ A2
                     log_AA = torch.log(AA + 1e-20).view(-1, AA.shape[-1])
                     
                     xent_loss, acc = self.compute_xent_loss(A, log_AA)
@@ -478,16 +626,45 @@ class TimeCycle(nn.Module):
                     diags['skip_accur'] += acc
                 
                 if t2 - t1 == 1:
-                    As.append(A)
+                    As.append(A.detach())
                     A12s.append(A1)
                     A21s.append(A2)
-                    AAs.append(AA)
+
+                    # AAs.append(AA)
 
                 if (np.random.random() < (0.05 / len(t_pairs)) or visualize) and (self.viz is not None): # and False:
                     self.viz.text('%s %s' % (t1, t2), opts=dict(height=1, width=10000), win='div')
                     with torch.no_grad():
                         self.visualize_frame_pair(x, ff, mm, t1, t2)
                         # import pdb; pdb.set_trace()
+
+            if self.garg('sk_targets', 0) > 0:
+                a12, a21 = A12s[0], A21s[0]
+                at = self.stoch_mat(As[0], do_dropout=False, do_sinkhorn=True)
+
+                for i in range(1, len(A12s)):
+                    a12 = a12 @ A12s[i]
+                    at = at @ self.stoch_mat(As[i], do_dropout=False, do_sinkhorn=True)
+                    # import pdb; pdb.set_trace()
+
+                    # a12 = A12s[i] @ a12
+                    # at = self.stoch_mat(As[i], do_dropout=False, do_sinkhorn=True) @ at
+
+                    log_a12 = torch.log(a12 + 1e-20).view(-1, a12.shape[-1])
+
+                    targets = self.sinkhorn_mat(at, tol=0.001, max_iter=10, verbose=False).argmax(-1).flatten()
+
+                    # import pdb; pdb.set_trace()
+                    _xent_loss = self.xent(log_a12, targets)
+
+                    xent_loss, acc = _xent_loss.mean().unsqueeze(-1), torch.ones(1).cuda()
+
+                    xents.append(xent_loss)
+                    
+                    diags['acc cyc %s' % str(i)] = acc
+                    diags['xent cyc %s' % str(i)] = xent_loss.mean().detach()
+
+                # import pdb; pdb.set_trace()
 
 
             # longer cycle:
@@ -504,11 +681,14 @@ class TimeCycle(nn.Module):
                     a21 = a21 @ A21s[i]
                     aa = a21 @ a12
 
+                    # print(i, aa.sum(-2).std())
+
                     log_aa = torch.log(aa + 1e-20).view(-1, aa.shape[-1])
+
 
                     xent_weight = None
                     if self.garg('xent_weight', False):
-                        xent_weight = self.loss_mask(As[i], aa).detach()
+                        xent_weight = self.loss_mask2(As[i], aa).detach()
                         # print(xent_weight.min(), xent_weight.max())
                         # import pdb; pdb.set_trace()
 
@@ -519,15 +699,21 @@ class TimeCycle(nn.Module):
                         xent_loss*=0
 
                     xents.append(xent_loss)
-                    kldvs.append(kldv_loss)
+                    # kldvs.append(kldv_loss)
                     
                     diags['acc cyc %s' % str(i)] = acc
-
                     if targets is not None:
                         diags['kl cyc %s' % str(i)] = kldv_loss.mean().detach()
                     else:
                         diags['xent cyc %s' % str(i)] = xent_loss.mean().detach()
 
+                # import pdb; pdb.set_trace()
+
+            log_trans = torch.log(torch.cat(A12s) + 1e-10)
+            diags['trans_ent_mean'] = log_trans.mean()
+            diags['trans_ent_std'] = log_trans.std()
+            diags['trans_ent_min'] = log_trans.sum(-1).min()
+            diags['trans_ent_max'] = log_trans.sum(-1).max()
             
         if _N > 1 and (np.random.random() < (0.01 / len(t_pairs)) or visualize) and self.viz is not None: # and False:
             # all patches
@@ -546,7 +732,6 @@ class TimeCycle(nn.Module):
             del diags[k]
 
         return ff, self.xent_coef * sum(xents)/max(1, len(xents)-1), self.kldv_coef * sum(kldvs)/max(1, len(kldvs)-1), diags
-
 
     def kldv_targets(self, A):
         '''

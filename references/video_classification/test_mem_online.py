@@ -89,6 +89,9 @@ parser.add_argument('--head-depth', default=0, type=int,
 
 parser.add_argument('--no-maxpool', default=False, action='store_true', help='')
 parser.add_argument('--use-res4', default=False, action='store_true', help='')
+parser.add_argument('--skip-res3', default=False, action='store_true', help='')
+parser.add_argument('--skip-res2', default=False, action='store_true', help='')
+
 parser.add_argument('--no-l2', default=False, action='store_true', help='')
 
 parser.add_argument('--long-mem', default=[0], type=int, nargs='*', help='')
@@ -378,10 +381,12 @@ def test(val_loader, model, epoch, use_cuda, args):
 
         model.load_state_dict(_model_state)
 
-
         model.xent_coef, model.kldv_coef = 1, 0
-        model.dropout_rate = 0.1
-        train_len = 3
+        model.long_coef, model.skip_coef = 1, 0
+        model.sk_align, model.sk_targets = True, False #, True, True #, True
+
+        model.dropout_rate = 0.0
+        train_len = 8
 
         def fit(model, video, targets, steps=1):
             optimizer = torch.optim.Adam(model.parameters(), lr=0.00005)#, momentum=0.9, weight_decay=0)
@@ -391,11 +396,15 @@ def test(val_loader, model, epoch, use_cuda, args):
                 fps = np.random.randint(1, 3)
                 idx = np.random.randint(video.shape[1]//fps - train_len)
                 x = video[:, ::fps][:, idx:idx+train_len].cuda()
+                # import pdb; pdb.set_trace()
 
                 # output, xent_loss, kldv_loss, diagnostics = model(video, orig=video, targets=targets)
                 # print('step', _, kldv_loss.mean().item(), diagnostics)
 
+                # output, xent_loss, kldv_loss, diagnostics = model(x, orig=x[0], unfold=False)
+                # import pdb; pdb.set_trace()
                 output, xent_loss, kldv_loss, diagnostics = model(x, orig=x[0], unfold=True)
+
                 if (_ % 20) == 0:
                     print('step', _, xent_loss.mean().item(), diagnostics)
 
@@ -415,6 +424,7 @@ def test(val_loader, model, epoch, use_cuda, args):
 
         b, bsize = 0, 5
         # fit(model, video, targets, steps=nsteps)
+        # imgs_total = 
         fit(model, imgs_total, None, steps=args.finetune)
         # import pdb; pdb.set_trace()
         torch.cuda.empty_cache()
@@ -500,6 +510,8 @@ def test(val_loader, model, epoch, use_cuda, args):
                     weights, ids = torch.topk(A, args.topk_vis, dim=-2)
                     weights = torch.nn.functional.softmax(weights, dim=-2)
                     
+                    # import pdb; pdb.set_trace()
+
                     w_s.append(weights.cpu())
                     i_s.append(ids.cpu())
 
@@ -559,6 +571,8 @@ def test(val_loader, model, epoch, use_cuda, args):
                     predlbls[:, :, :] -= predlbls.min(-1)[0][:, :, None]
                     predlbls[:, :, :] /= predlbls.max(-1)[0][:, :, None]
 
+                import pdb; pdb.set_trace()
+
                 _maps = []
 
                 if 'jhmdb' in args.filelist.lower():
@@ -593,20 +607,19 @@ def test(val_loader, model, epoch, use_cuda, args):
 
             if args.visdom:
                 # wandb.log({'vid%s' % batch_idx: [wandb.Image(mm[0]) for mm in maps]})  
-                for m in maps:
-                    wandb.log({'blend vid%s' % batch_idx: wandb.Image(
-                        m[0])})
+                # for m in maps:
+                #     wandb.log({'blend vid%s' % batch_idx: wandb.Image(
+                #         m[0])})
 
-                # wandb.log({'blend vid%s' % batch_idx: wandb.Video(
-                # np.array([m[0] for m in maps]).transpose(0, -1, 1, 2), fps=12, format="gif")})  
+                wandb.log({'blend vid%s' % batch_idx: wandb.Video(
+                np.array([m[0] for m in maps]).transpose(0, -1, 1, 2), fps=12, format="gif")})  
                 
                 wandb.log({'prob vid%s' % batch_idx: wandb.Video(
                     np.array([m[-1] for m in maps]).transpose(0, -1, 1, 2), fps=12, format="gif")})  
                 
-                
     #            import pdb; pdb.set_trace()
-                wandb.log({'plain vid%s' % batch_idx: wandb.Video(
-                    np.array(images).transpose(0, -1, 1, 2), fps=12, format="gif")})  
+                # wandb.log({'plain vid%s' % batch_idx: wandb.Video(
+                #     np.array(images).transpose(0, -1, 1, 2), fps=12, format="gif")})  
                 
             torch.cuda.empty_cache()
             print('******* Vid %s TOOK %s *******' % (batch_idx, time.time() - t_vid))
