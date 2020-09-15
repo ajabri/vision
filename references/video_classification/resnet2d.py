@@ -77,6 +77,56 @@ def conv1x1(in_planes, out_planes, stride=1):
     return nn.Conv2d(in_planes, out_planes, kernel_size=1, stride=stride, bias=False)
 
 
+import torch.nn.functional as F
+import utils
+class VQ(nn.Module):
+    def __init__(self, K=100, temp=0.3):
+        super(VQ, self).__init__()
+        
+        self.temp = temp
+        self.K = K
+
+    def forward(self, x):
+        l2_x = F.normalize(x, dim=1, p=2)
+        some_x = l2_x.flatten(-2)
+
+        # with torch.no_grad():
+        #     xxt = F.softmax(torch.einsum('nci,ncj->nij', some_x, some_x), dim=-1)
+        #     xent = (-xxt * (xxt + 1e-8).log()).sum(-1)
+
+        #     # xent_idx = xent.sort(dim=-1)[1][:xent.shape[-1]//2]
+        #     xent_V, xent_I = xent.sort(dim=-1)
+        #     xent_V = F.softmax(xent_V, dim=-1).cpu().detach().numpy()
+        #     xent_idx = [np.random.choice(np.arange(xent.shape[-1]), size=(self.K), replace=True, p=xent_V[ii]) for ii in range(xent.shape[0])]
+        #     xent_idx = torch.from_numpy(np.stack(xent_idx)).cuda()
+        #     # import pdb; pdb.set_trace()
+
+        #     # [:, :self.K]
+        #     some_x = some_x.gather(-1, xent_idx[:, None].expand(xent_idx.shape[0], some_x.shape[1], xent_idx.shape[1]))
+
+        #     # import pdb; pdb.set_trace()
+
+        some_idx = torch.randint(some_x.shape[-1], (self.K,))
+        some_x = some_x[..., some_idx]
+
+        K = torch.einsum('nchw,nck->nkhw', l2_x, some_x)
+
+        N, k, H, W = K.shape
+        K = K.permute(0, 2, 3, 1).flatten(0, -2)
+        K = utils.sinkhorn_knopp((K/self.temp).exp(), max_iter=4, tol=10e-5, verbose=False)
+        K = K.view(N, H, W, k).permute(0, 3, 1, 2)
+        
+        x = torch.einsum('nkhw,nck->nchw', K, some_x) #+ x
+
+        return x
+
+    def forward2(self, x):
+        from anisotrophic import anisotropic_diffusion
+        xout = anisotropic_diffusion(x)
+        # import pdb; pdb.set_trace()
+        return xout
+
+
 class BasicBlock(nn.Module):
     expansion = 1
     __constants__ = ['downsample']
@@ -187,6 +237,7 @@ class ResNet(nn.Module):
                  norm_layer=None,
                  strides=[None, None, None, None, None, None], # last two: maxpool, conv1
                  paddings=[None, None, None, None, None, None], 
+                 vqs=[False, False, False, False],
                  residual=True):
 
         super(ResNet, self).__init__()
@@ -220,13 +271,13 @@ class ResNet(nn.Module):
         self.bn1 = norm_layer(self.inplanes)
         self.relu = nn.ReLU(inplace=True)
         self.maxpool = nn.MaxPool2d(kernel_size=3, stride=strides[-2] or 2, padding=paddings[-2] or 1) if not (strides[-2] and strides[-2] <= 1) else None
-        self.layer1 = self._make_layer(block, 64, layers[0], stride=strides[0] or 1, padding=paddings[0])
+        self.layer1 = self._make_layer(block, 64, layers[0], stride=strides[0] or 1, padding=paddings[0], vq=vqs[-1])
         self.layer2 = self._make_layer(block, 128, layers[1], stride=strides[1] or 2, padding=paddings[1],
-                                       dilate=replace_stride_with_dilation[0])
+                                       dilate=replace_stride_with_dilation[0], vq=vqs[-3])
         self.layer3 = self._make_layer(block, 256, layers[2], stride=strides[2] or 1, padding=paddings[2],
-                                       dilate=replace_stride_with_dilation[1])
+                                       dilate=replace_stride_with_dilation[1], vq=vqs[-2])
         self.layer4 = self._make_layer(block, 512, layers[3], stride=strides[3] or 1, padding=paddings[3],
-                                       dilate=replace_stride_with_dilation[2])
+                                       dilate=replace_stride_with_dilation[2], vq=vqs[-1])
         self.avgpool = nn.AdaptiveAvgPool2d((1, 1))
         self.fc = nn.Linear(512 * block.expansion, num_classes)
 
@@ -247,7 +298,7 @@ class ResNet(nn.Module):
                 elif isinstance(m, BasicBlock):
                     nn.init.constant_(m.bn2.weight, 0)
 
-    def _make_layer(self, block, planes, blocks, stride=1, dilate=False, padding=None):
+    def _make_layer(self, block, planes, blocks, stride=1, dilate=False, padding=None, vq=False):
         norm_layer = self._norm_layer
         downsample = None
         previous_dilation = self.dilation
@@ -269,7 +320,8 @@ class ResNet(nn.Module):
             layers.append(block(self.inplanes, planes, groups=self.groups,
                                 base_width=self.base_width, dilation=self.dilation,
                                 norm_layer=norm_layer, padding=padding, residual=self.residual))
-
+        if vq:
+            layers.append(VQ())
         return nn.Sequential(*layers)
 
     def forward(self, x):
@@ -320,6 +372,18 @@ def resnet18(pretrained=False, progress=True, **kwargs):
     return _resnet('resnet18', BasicBlock, [2, 2, 2, 2], pretrained, progress,
                    **kwargs)
 
+def resnet18vq(pretrained=False, progress=True, **kwargs):
+    r"""ResNet-18 model from
+    `"Deep Residual Learning for Image Recognition" <https://arxiv.org/pdf/1512.03385.pdf>`_
+
+    Args:
+        pretrained (bool): If True, returns a model pre-trained on ImageNet
+        progress (bool): If True, displays a progress bar of the download to stderr
+    """
+    return _resnet('resnet18', BasicBlock, [2, 2, 2, 2], pretrained, progress,
+                    vqs=[False, True, True, False],
+                   **kwargs) 
+
 def thinnet(pretrained=False, progress=True, **kwargs):
     r"""ResNet-18 model from
     `"Deep Residual Learning for Image Recognition" <https://arxiv.org/pdf/1512.03385.pdf>`_
@@ -360,9 +424,11 @@ def thinnet2_nopad(pretrained=False, progress=True, **kwargs):
     """
     kwargs['width_per_group'] = 64 #* 2
 
-    return _resnet('resnet10', BasicBlock, [1, 1, 1, 0], False, progress,
+    return _resnet('resnet10', BasicBlock, [1, 1, 2, 0], False, progress,
                     paddings=[0, 0, 0, 0, 0, 0], 
                     strides=[2, 2, 1, 1, 1, None],
+                    # vqs=[False, False, True, True],
+                    vqs=[False, False, True, False],
                     residual=True,
                    **kwargs)
 

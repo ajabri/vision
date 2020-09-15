@@ -333,6 +333,9 @@ def process_pose(predlbls, lbl_set, topk=3):
 
     return current_coord.cpu(), predlbls_val_sharp
 
+import kornia
+import kornia.augmentation as K
+
 def test(val_loader, model, epoch, use_cuda, args):
 
     save_path = args.save_path + '/'
@@ -386,11 +389,15 @@ def test(val_loader, model, epoch, use_cuda, args):
         model.sk_align, model.sk_targets = True, False #, True, True #, True
 
         model.dropout_rate = 0.0
-        train_len = 8
+        train_len = 3
+
 
         def fit(model, video, targets, steps=1):
             optimizer = torch.optim.Adam(model.parameters(), lr=0.00005)#, momentum=0.9, weight_decay=0)
             # optimizer = torch.optim.SGD(model.parameters(), lr=0.1)#, momentum=0.9, weight_decay=0)
+
+            h = video.shape[-2]
+            random_crop = K.RandomCrop((h, h), same_on_batch=True)
 
             for _ in range(steps):
                 fps = np.random.randint(1, 3)
@@ -401,9 +408,11 @@ def test(val_loader, model, epoch, use_cuda, args):
                 # output, xent_loss, kldv_loss, diagnostics = model(video, orig=video, targets=targets)
                 # print('step', _, kldv_loss.mean().item(), diagnostics)
 
-                # output, xent_loss, kldv_loss, diagnostics = model(x, orig=x[0], unfold=False)
                 # import pdb; pdb.set_trace()
-                output, xent_loss, kldv_loss, diagnostics = model(x, orig=x[0], unfold=True)
+                x = random_crop(x[0])[None]
+                output, xent_loss, kldv_loss, diagnostics = model(x, orig=x[0], unfold=False)
+                # import pdb; pdb.set_trace()
+                # output, xent_loss, kldv_loss, diagnostics = model(x, orig=x[0], unfold=True)
 
                 if (_ % 20) == 0:
                     print('step', _, xent_loss.mean().item(), diagnostics)
@@ -571,7 +580,7 @@ def test(val_loader, model, epoch, use_cuda, args):
                     predlbls[:, :, :] -= predlbls.min(-1)[0][:, :, None]
                     predlbls[:, :, :] /= predlbls.max(-1)[0][:, :, None]
 
-                import pdb; pdb.set_trace()
+                # import pdb; pdb.set_trace()
 
                 _maps = []
 

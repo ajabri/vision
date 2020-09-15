@@ -489,7 +489,7 @@ def draw_matches(x1, x2, i1, i2):
     i1, i2 = cv2.resize(i1, (400, 400)), cv2.resize(i2, (400, 400))
 
     for check in [True]:
-        bf = cv2.BFMatcher(cv2.NORM_L2, crossCheck=check)
+        bf = cv2.BFMatcher(cv2.NORM_L2, crossCheck=False)
         # matches = bf.match(x1.permute(0,2,1).view(-1, 128).cpu().detach().numpy(), x2.permute(0,2,1).view(-1, 128).cpu().detach().numpy())
 
         h = int(x1.shape[-1]**0.5)
@@ -1055,48 +1055,24 @@ def nn_pca(f, X, name='', vis=None):
 
 #     return flows
 
-# def compute_flow(corr):
-#     nnf = corr.argmax(dim=1)
-#     # nnf = nnf.transpose(-1, -2)
-
-#     u = nnf % nnf.shape[-1]
-#     v = nnf / nnf.shape[-2] # nnf is an IntTensor so rounds automatically
-
-#     rr = torch.arange(u.shape[-1])[None].long().cuda()
-
-#     for i in range(u.shape[-1]):
-#         u[:, i] -= rr
-
-#     for i in range(v.shape[-1]):
-#         v[:, :, i] -= rr
-
-#     flows = vis_flow(u, v)
-
-#     return flows, u, v
-
-
-def nn_field(A):
-    assert A.ndim == 4
-    assert A.shape[1] == (A.shape[2] * A.shape[3])
-
-    # assume corr is shape N x H * W x W x H
-    nnf = A.argmax(dim=1)
-
-    # nnf = nnf.transpose(-1, -2)
-
-    u = nnf % nnf.shape[-1]
-    v = nnf / nnf.shape[-2] # nnf is an IntTensor so rounds automatically
 
 
 def compute_flow(corr):
     # assume corr is shape N x H * W x W x H
-    nnf = corr.argmax(dim=1)
-    nnf = nnf.transpose(-1, -2)
+    
+    h = w = int(corr.shape[-1] ** 0.5)
 
-    u = nnf % nnf.shape[-1]
-    v = nnf / nnf.shape[-2] # nnf is an IntTensor so rounds automatically
+    # import pdb; pdb.set_trace()
+
+    # x1 -> x2
+    corr = corr.transpose(-1, -2).view(*corr.shape[:-1], h, w)
+    nnf = corr.argmax(dim=1)
+
+    u = nnf % w # nnf.shape[-1]
+    v = nnf / h # nnf.shape[-2] # nnf is an IntTensor so rounds automatically
 
     rr = torch.arange(u.shape[-1])[None].long().cuda()
+
 
     for i in range(u.shape[-1]):
         u[:, i] -= rr
@@ -1230,6 +1206,18 @@ def make_encoder(args):
 
         if args.no_maxpool:
             resnet.maxpool = None
+    
+    elif model_type == 'scratch_vq':
+        # resnet = resnet3d.r2d_10(pretrained=False)
+
+        # resnet = aa_resnet.resnet18(pretrained=False)
+        # norm_layer=lambda x: nn.GroupNorm(1, x)
+        # resnet = resnet2d.resnet34(pretrained=False,)        
+
+        resnet = resnet2d.resnet18vq(pretrained=False)#, norm_layer=norm_layer)
+
+        if args.no_maxpool:
+            resnet.maxpool = None
 
     elif model_type == 'scratch_deep':
         # resnet = resnet3d.r2d_10(pretrained=False)
@@ -1276,8 +1264,9 @@ def make_encoder(args):
         # resnet = aa_resnet.resnet18(pretrained=False)
         # norm_layer=lambda x: nn.GroupNorm(1, x)
         # resnet = resnet2d.resnet34(pretrained=False,)        
+        norm_layer = Identity
 
-        resnet = resnet2d.thinnet2_nopad(pretrained=False)#, norm_layer=norm_layer)
+        resnet = resnet2d.thinnet2_nopad(pretrained=False, norm_layer=norm_layer)
 
         if args.no_maxpool:
             resnet.maxpool = None
@@ -1650,3 +1639,34 @@ def vis_pose(oriImg, points):
             cv2.line(canvas, (x1, y1), (x2, y2), colors[n], 8)
 
     return canvas
+
+
+def sinkhorn_knopp(A, tol=0.01, max_iter=1000, verbose=False):
+    _iter = 0
+    
+    if A.ndim > 2:
+        A = A / A.sum(-1).sum(-1)[:, None, None]
+    else:
+        A = A / A.sum(-1).sum(-1)[None, None]
+
+    A1 = A2 = A 
+
+    if verbose:
+        if torch.isnan(A.sum()):
+            import pdb; pdb.set_trace()
+
+        print('------------row/col sums before', A.sum(-1).std().item(), A.sum(-2).std().item())
+
+    while (A2.sum(-2).std() > tol and _iter < max_iter) or _iter == 0:
+        A1 = F.normalize(A2, p=1, dim=-2)
+        A2 = F.normalize(A1, p=1, dim=-1)
+
+        _iter += 1
+        if verbose:
+            print(A2.max(), A2.min())
+            print('row/col sums', A2.sum(-1).std().item(), A2.sum(-2).std().item())
+
+    if verbose:
+        print('------------row/col sums aft', A2.sum(-1).std().item(), A2.sum(-2).std().item())
+
+    return A2 

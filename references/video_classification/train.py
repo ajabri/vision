@@ -318,15 +318,22 @@ def train_one_epoch(model, criterion, optimizer, lr_scheduler, data_loader, devi
 
         video = video.to(device)
         output, xent_loss, kldv_loss, diagnostics = model(video, orig=orig)
-        loss = (xent_loss.mean() + kldv_loss.mean())
+        xent_loss, kldv_loss = xent_loss.mean(), kldv_loss.mean()
+
+        loss = 0
+        if xent_loss > 0:
+            loss += xent_loss
+        if kldv_loss > 0:
+            loss += kldv_loss
+
         # print(xent_loss, kldv_loss, loss)
 
-        if vis is not None and np.random.random() < 0.05:
-            vis.wandb_init()
-            vis.log(dict(xent_loss=xent_loss.mean().item()))
-            vis.log(dict(kldv_loss=kldv_loss.mean().item()))
-            for k,v in diagnostics.items():
-                vis.log({k:v.mean().item()})
+        # if vis is not None and np.random.random() < 0.05:
+        #     vis.wandb_init()
+        #     vis.log(dict(xent_loss=xent_loss.mean().item()))
+        #     vis.log(dict(kldv_loss=kldv_loss.mean().item()))
+        #     for k,v in diagnostics.items():
+        #         vis.log({k:v.mean().item()})
 
         if checkpoint_fn is not None and np.random.random() < 0.005:
             checkpoint_fn()

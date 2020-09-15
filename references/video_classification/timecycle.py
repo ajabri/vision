@@ -371,12 +371,15 @@ class TimeCycle(nn.Module):
         B, N, C, T, h, w = x.shape
         x = x.reshape(B*N, C, T, h, w) 
 
+
         rand_resize = self.garg('random_resize', False)
+
         if rand_resize and np.random.random() > 0.5 and (rand_resize[1] - rand_resize[0]) > 0:
             x = x.flatten(1,2)
             _rand_size = np.random.randint(rand_resize[0], rand_resize[1])
             x = torch.nn.functional.interpolate(x, size=(_rand_size, _rand_size), mode='bilinear', align_corners=False)
             x = x.view(B*N, C, T, x.shape[-2], x.shape[-1])
+
 
         mm = self.encoder(x)
 
@@ -423,6 +426,24 @@ class TimeCycle(nn.Module):
 
         xent_weight = torch.clamp(xent_weight, min=0, max=5)
         return xent_weight
+
+
+    def loss_mask3(self, A, P):
+        '''
+            P is row-normalized, process stochastic matrix of affinity A
+        '''
+        entropy = (-P * torch.log(P)).sum(-1) / np.log(P.shape[-1])
+        # entropy /= (np.log(entropy.shape[-1])/10)
+
+        xent_topk = entropy.topk(k=entropy.shape[-1]//10, dim=-1)[0].min()
+        entropy[entropy < xent_topk] = 0
+        
+        # entropy = F.relu(entropy-xent_topk) + xent_topk
+
+        # import pdb; pdb.set_trace()
+        print(entropy.min(), entropy.max())
+
+        return entropy
 
     def loss_mask2(self, A, P, k=10):
         '''
@@ -673,13 +694,13 @@ class TimeCycle(nn.Module):
                 # a12, a21 = torch.eye(A12s[0].shape[-2])[None].cuda(), torch.eye(A21s[0].shape[-1])[None].cuda()
 
                 for i in range(1, len(A12s)):
-                    # a12 = a12 @ A12s[i]
-                    # a21 = A21s[i] @ a21
-                    # aa = a12 @ a21
+                    a12 = a12 @ A12s[i]
+                    a21 = A21s[i] @ a21
+                    aa = a12 @ a21
 
-                    a12 = A12s[i] @ a12
-                    a21 = a21 @ A21s[i]
-                    aa = a21 @ a12
+                    # a12 = A12s[i] @ a12
+                    # a21 = a21 @ A21s[i]
+                    # aa = a21 @ a12
 
                     # print(i, aa.sum(-2).std())
 
@@ -688,7 +709,11 @@ class TimeCycle(nn.Module):
 
                     xent_weight = None
                     if self.garg('xent_weight', False):
-                        xent_weight = self.loss_mask2(As[i], aa).detach()
+                        # xent_weight = self.loss_mask2(As[i], aa).detach()
+                        xent_weight = self.loss_mask3(As[i], aa).detach()
+
+                        # import pdb; pdb.set_trace()
+                        
                         # print(xent_weight.min(), xent_weight.max())
                         # import pdb; pdb.set_trace()
 
@@ -699,7 +724,7 @@ class TimeCycle(nn.Module):
                         xent_loss*=0
 
                     xents.append(xent_loss)
-                    # kldvs.append(kldv_loss)
+                    kldvs.append(kldv_loss)
                     
                     diags['acc cyc %s' % str(i)] = acc
                     if targets is not None:
@@ -772,7 +797,7 @@ class TimeCycle(nn.Module):
             return _xent_loss.mean().unsqueeze(-1), \
                 (torch.argmax(log_AA, dim=-1) == targets).float().mean().unsqueeze(-1)
         else:
-            return 0, 0
+            return torch.zeros(1).to(A.device), 0
 
     def compute_kldv_loss(self, A, log_AA, targets=None):
         # KL Div with Smoothed 2D Targets
@@ -784,7 +809,8 @@ class TimeCycle(nn.Module):
             # print(kldv_loss, log_AA.min(), AA.min(), A.min())
             return kldv_loss
         else:
-            return 0
+            return torch.zeros(1).to(A.device)
+
 
     def visualize_frame_pair(self, x, ff, mm, t1, t2):
         normalize = lambda x: (x-x.min()) / (x-x.min()).max()
@@ -827,14 +853,73 @@ class TimeCycle(nn.Module):
         ## FLOW
         ##############################################
 
+        import matplotlib as mpl
+        import matplotlib.pyplot as plt
+
+        x1, x2 =  x[0, :, :, t1],  x[0, :, :, t2]
+        # x1 -= x1.min(); x1 /= x1.max()
+        # x2 -= x2.min(); x2 /= x2.max()
+        x1, x2 = normalize(x1), normalize(x2)
+
         # _A = A.view(*A.shape[:2], f1.shape[-1], -1)
-        # u, v = utils.compute_flow(_A[0:1])
-        # flows = torch.stack([u, v], dim=-1).cpu().numpy()
+        A_flow = A
+        # A_flow = self.stoch_mat(A, zero_diagonal=False, do_dropout=False, do_sinkhorn=True)
+        u, v = utils.compute_flow(A_flow[0:1])
+        flows = torch.stack([u, v], dim=-1).cpu().numpy()
+
+        I, flows = x1.cpu().numpy()[0], flows[0]
+
+        Ih, Iw, = I.shape[-2:]
+        mx, my = np.mgrid[0:Ih:Ih/(H+1), 0:Iw:Iw/(W+1)][:, 1:, 1:]
+        skip = (slice(None, None, 1), slice(None, None, 1))
+
+        ii = 0
+        fig, ax = plt.subplots()
+        im = ax.imshow((I.transpose(1,2,0)),)
+            # extent=[mx.min(), mx.max(), my.min(), my.max()])
+        # import pdb; pdb.set_trace()
+        
+        C = mpl.cm.jet(F.softmax((A1[0] * A1[0].log()).sum(-1).cpu(), dim=-1))
+
+        ax.quiver(my[skip], mx[skip], flows[...,0][skip], flows[...,1][skip]*-1, C)#, scale=1, scale_units='dots')
+        # ax.quiver(mx[skip], my[skip], flows[...,0][skip], flows[...,1][skip])
+        self.viz.matplot(plt, win='flow_quiver%s' %ii)
+        ii+=1
+
+        # fig, ax = plt.subplots()
+        # im = ax.imshow((I.transpose(1,2,0)),)
+        #     # extent=[mx.min(), mx.max(), my.min(), my.max()])
+        # ax.quiver(my[skip], mx[skip], flows[...,1][skip], flows[...,0][skip])
+        # # ax.quiver(mx[skip], my[skip], flows[...,0][skip], flows[...,1][skip])
+        # self.viz.matplot(plt, win='flow_quiver%s' %ii)
+        # ii+=1
+
+        # fig, ax = plt.subplots()
+        # im = ax.imshow((I.transpose(1,2,0)),)
+        #     # extent=[mx.min(), mx.max(), my.min(), my.max()])
+        # ax.quiver(my[skip], mx[skip][::-1], flows[...,0][skip], flows[...,1][skip])
+        # # ax.quiver(mx[skip], my[skip], flows[...,0][skip], flows[...,1][skip])
+        # self.viz.matplot(plt, win='flow_quiver%s' %ii)
+        # ii+=1
+
+        # fig, ax = plt.subplots()
+        # im = ax.imshow((I.transpose(1,2,0)),)
+        #     # extent=[mx.min(), mx.max(), my.min(), my.max()])
+        # ax.quiver(my[skip], mx[skip], flows[...,0][skip], flows[...,1][skip]*-1)
+        # # ax.quiver(mx[skip], my[skip], flows[...,0][skip], flows[...,1][skip])
+        # self.viz.matplot(plt, win='flow_quiver%s' %ii)
+        # ii+=1
+
+        # import pdb; pdb.set_trace()
+        # ax.set(aspect=1, title='Quiver Plot')
+
+        # plt.show()
+
         # flows = utils.draw_hsv(flows[0])
         # flows = cv2.resize(flows, (256, 256))
         # self.viz.image((flows).transpose(2, 0, 1), win='flow')
-        # # flows = [cv2.resize(flow.clip(min=0).astype(np.uint8), (256, 256)) for flow in flows]
-        # # self.viz.image((flows[0]).transpose(2, 0, 1))
+        # flows = [cv2.resize(flow.clip(min=0).astype(np.uint8), (256, 256)) for flow in flows]
+        # self.viz.image((flows[0]).transpose(2, 0, 1))
 
         # import pdb; pdb.set_trace()
         if (len(x.shape) == 6 and x.shape[1] == 1):
@@ -844,6 +929,7 @@ class TimeCycle(nn.Module):
             # IMG VIZ
             # X here is B x C x T x H x W
             x1, x2 = x[0, :, t1].clone(), x[0, :, t2].clone()
+            
             # x1 -= x1.min(); x1 /= x1.max()
             # x2 -= x2.min(); x2 /= x2.max()
 
