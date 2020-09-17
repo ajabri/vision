@@ -64,31 +64,18 @@ class CRaWl(nn.Module):
         self.selfsim_head = self.make_conv3d_head(depth=1)
         self.context_head = self.make_conv3d_head(depth=1)
 
-        # self.selfsim_head = self.make_head([self.enc_hid_dim, 2*self.enc_hid_dim, self.enc_hid_dim])
-        # self.context_head = self.make_head([self.enc_hid_dim, 2*self.enc_hid_dim, self.enc_hid_dim])
-
-        if self.garg('cal_coef', 0) > 0:
-            self.stack_encoder = utils.make_stack_encoder(self.enc_hid_dim)
-
-        # # assuming no fc pre-training
-        # for m in self.modules():
-        #     if isinstance(m, nn.Linear):
-        #         m.weight.data.normal_(0, 0.01)
-        #         m.bias.data.zero_()
-
-        self.edge = getattr(args, 'edgefunc', 'softmax')
-
         # self.kldv = torch.nn.KLDivLoss(reduction="batchmean")
         self.kldv = torch.nn.KLDivLoss(reduction="batchmean")
         self.xent = torch.nn.CrossEntropyLoss(reduction="none")
 
         self.target_temp = 1
+        self._n_batches = 0
 
         self._xent_targets = {}
         self._kldv_targets = {}
         
         if self.garg('restrict', 0) > 0:
-            self.restrict = utils.RestrictAttention(int(args.restrict))
+            self.restrict = utils.MaskedAttention(int(args.restrict))
         else:
             self.restrict =  None
 
@@ -104,7 +91,7 @@ class CRaWl(nn.Module):
         if vis is not None:
             self._viz = vis
     
-        p_sz, stride = 64, 16
+        p_sz, stride = 64, 32
         self.k_patch =  nn.Sequential(
             K.RandomResizedCrop(size=(p_sz, p_sz), scale=(0.7, 0.9), ratio=(0.7, 1.3))
         )
@@ -126,13 +113,9 @@ class CRaWl(nn.Module):
 
         self.unfold = torch.nn.Unfold((p_sz,p_sz), dilation=1, padding=0, stride=(stride, stride))
 
-
     def infer_dims(self):
-        # if '2D' in str(type(self.encoder.conv1)):
         in_sz = 256
         dummy = torch.zeros(1, 3, 1, in_sz, in_sz).to(next(self.encoder.parameters()).device)
-        # else:
-        #     dummy = torch.Tensor(1, 3, 224, 224)
         dummy_out = self.encoder(dummy)
 
         self.enc_hid_dim = dummy_out.shape[1]
@@ -143,18 +126,23 @@ class CRaWl(nn.Module):
 
         if depth == -1:
             return Identity()
+
         if depth == 0:
             return nn.Linear(self.enc_hid_dim, 128)
-        else:
-            dims = [self.enc_hid_dim] + [self.enc_hid_dim] * depth + [128]
 
-            for d1, d2 in zip(dims, dims[1:]):
-                # h = nn.Conv3d(d1, d2, kernel_size=1, bias=True)
-                # nn.init.kaiming_normal_(h.weight, mode='fan_out', nonlinearity='relu')
-                h = nn.Linear(d1, d2)
-                head += [h, nn.ReLU()]
+        dims = [self.enc_hid_dim] + [self.enc_hid_dim] * depth + [128]
 
-        # head = head[:-1]
+        for d1, d2 in zip(dims, dims[1:]):
+            # h = nn.Conv3d(d1, d2, kernel_size=1, bias=True)
+            # nn.init.kaiming_normal_(h.weight, mode='fan_out', nonlinearity='relu')
+            h = nn.Linear(d1, d2)
+            
+            h.weight.data.normal_(0, 0.01)
+            h.bias.data.zero_()
+
+            head += [h, nn.ReLU()]
+
+        head = head[:-1]
         head = nn.Sequential(*head)
         return head
 
@@ -193,82 +181,33 @@ class CRaWl(nn.Module):
 
     def zeroout_diag(self, A, zero=0):
         mask = (torch.eye(A.shape[-1]).unsqueeze(0).repeat(A.shape[0], 1, 1).bool() < 1).float().cuda()
-        # import pdb; pdb.set_trace()
         return A * mask
 
     def dropout_mask(self, A):
         return (torch.rand(A.shape) < self.dropout_rate).to(self.args.device)
 
     def compute_affinity(self, x1, x2, do_dropout=True, zero_diagonal=None):
-        B, C, N = x1.shape
-        H = int(N**0.5)
-        # assert x1.shape == x2.shape
-
         if do_dropout and self.featdrop_rate > 0:
             x1, x2 = self.featdrop(x1), self.featdrop(x2)
             x1, x2 = F.normalize(x1, dim=1), F.normalize(x2, dim=1)
 
-        # import pdb; pdb.set_trace()
-        # import time
-        t0 = time.time()
-        
-        # fast mm, pretty
-        # import pdb; pdb.set_trace()
         A = torch.einsum('bcn,bcm->bnm', x1, x2)
 
-        # t1 = time.time()
-
-        # # more flexible
-        # from spatial_correlation_sampler import spatial_correlation_sample
-        # # A_s = self.scorr(x1.view(B, C, int(N**0.5), int(N**0.5)).contiguous(), x2.view(B, C, int(N**0.5), int(N**0.5)).contiguous())     
-
-        # utils.nn_field(A.view(*A.shape[:2], H, H))
-
-        # import pdb; pdb.set_trace()
-
-        # xx1, xx2 = x1.view(B, C, H, H).contiguous(), x2.view(B, C, H, H).contiguous()
-        # A_s = spatial_correlation_sample(xx1, xx2, 1, H, 1, 0, 1)
-                            #    kernel_size=1,
-                            #    patch_size=H,
-                            #    stride=1,
-                            #    padding=0,
-                            #    dilation_patch=1)
-        # # cc = utils.Correlation(pad_size=0, kernel_size=1, max_displacement=H, stride1=1, stride2=1, corr_multiply=1)
-        # # A_s = cc(x1.view(B, C, H, H).contiguous(), x2.view(B, C, H, H).contiguous())
-
-        # t2 = time.time()
-        # print(t2-t1, t1-t0)
-        # import pdb; pdb.set_trace()
-
-        if self.restrict is not None: #: and do_dropout:
+        if self.restrict is not None:
             A = self.restrict(A)
 
-
-        return A #, AA, log_AA, A1, A2
+        return A
     
     def stoch_mat(self, A, zero_diagonal=True, do_dropout=True):
-        '''
-            Affinity -> Stochastic Matrix
-        '''
+        ''' Affinity -> Stochastic Matrix '''
 
         if (zero_diagonal is not False) and self.zero_diagonal:
             A = self.zeroout_diag(A)
 
         if do_dropout and self.dropout_rate > 0:
             mask = self.dropout_mask(A)
-            # A = A.clone()
             A[mask] = -1e20
-
-        if self.edge == 'softmax':
-            # import pdb; pdb.set_trace()
-            A = F.softmax(A/self.temperature, dim=-1)
-            # A = F.normalize(A - A.min(-1)[0][..., None] + 1e-20, dim=-1, p=1)
-        else:
-            if not hasattr(self, 'graph_bias'):
-                self.graph_bias = nn.Parameter((torch.ones(*A.shape[-2:])) * 1e-2).to(next(self.encoder.parameters()).device)
-            A = F.normalize(F.relu(A + self.graph_bias)**2, dim=-1, p=1)
-
-        ## TODO TOP K
+        A = F.softmax(A/self.temperature, dim=-1)
 
         return A
 
@@ -329,11 +268,6 @@ class CRaWl(nn.Module):
         # import pdb; pdb.set_trace()
 
     def forward(self, x, orig=None, just_feats=False, visualize=False, targets=None, unfold=False):
-        # x = x.cpu() * 0 + torch.randn(x.shape)
-        # x = x.cuda()
-        # orig = orig.cpu() * 0 + torch.randn(orig.shape)
-        # orig = orig.cuda()
-        
         xents = [torch.tensor([0.]).to(self.args.device)]
         kldvs = [torch.tensor([0.]).to(self.args.device)]
         diags = dict(skip_accur=torch.tensor([0.]).to(self.args.device))
@@ -441,6 +375,7 @@ class CRaWl(nn.Module):
                 AA = A1 @ A2
 
                 if self.garg('skip_coef', 0) > 0:
+                    
                     log_AA = torch.log(AA + 1e-20).view(-1, AA.shape[-1])
                     
                     xent_loss, acc = self.compute_xent_loss(A, log_AA)
@@ -519,6 +454,8 @@ class CRaWl(nn.Module):
         for k in diag_keys:
             diags["%s %s" % (H, k)] = diags[k]
             del diags[k]
+
+        self._n_batches += 1
 
         return ff, self.xent_coef * sum(xents)/max(1, len(xents)-1), self.kldv_coef * sum(kldvs)/max(1, len(kldvs)-1), diags
 

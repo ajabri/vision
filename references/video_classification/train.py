@@ -9,7 +9,6 @@ import torch.utils.data
 from torch.utils.data.dataloader import default_collate
 from torch import nn
 import torchvision
-import torchvision.datasets.video_utils
 
 import data
 from data.kinetics import Kinetics400
@@ -322,7 +321,6 @@ def train_one_epoch(model, criterion, optimizer, lr_scheduler, data_loader, devi
         video = video.to(device)
         output, xent_loss, kldv_loss, diagnostics = model(video, orig=orig)
         loss = (xent_loss.mean() + kldv_loss.mean())
-        # print(xent_loss, kldv_loss, loss)
 
         if vis is not None and np.random.random() < 0.01:
             vis.log('xent_loss', xent_loss.mean().item())
@@ -348,17 +346,12 @@ def train_one_epoch(model, criterion, optimizer, lr_scheduler, data_loader, devi
         # print(torch.nn.utils.clip_grad_norm_(model.parameters(), 10), 'grad norm')
         optimizer.step()
 
-        # acc1, acc5 = utils.accuracy(output, target, topk=(1, 5))
         batch_size = video.shape[0]
         metric_logger.update(loss=loss.item(), lr=optimizer.param_groups[0]["lr"])
-        # metric_logger.meters['acc1'].update(acc1.item(), n=batch_size)
-        # metric_logger.meters['acc5'].update(acc5.item(), n=batch_size)
         metric_logger.meters['clips/s'].update(batch_size / (time.time() - start_time))
         lr_scheduler.step()
 
     checkpoint_fn()
-
-
 
 
 def _get_cache_path(filepath):
@@ -523,7 +516,7 @@ def main(args):
             model.parameters(), lr=lr, momentum=args.momentum, weight_decay=args.weight_decay)
     else:
         assert args.optim == 'adam'
-        optimizer = torch.optim.Adam(model.parameters(), lr=lr)
+        optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=1e-5)
 
     if args.apex:
         model, optimizer = amp.initialize(model, optimizer, opt_level=args.apex_opt_level )

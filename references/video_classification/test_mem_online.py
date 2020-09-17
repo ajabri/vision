@@ -1,13 +1,8 @@
 from __future__ import print_function
 
-import argparse
 import os
-import shutil
 import time
-import random
-import cv2
 import imageio
-
 import numpy as np
 
 import torch
@@ -105,27 +100,40 @@ def test(loader, model, args):
         model.load_state_dict(_model_state)
 
         model.xent_coef, model.kldv_coef = 1, 0
-        model.dropout_rate = 0.1
+        model.args.skip_coef = 1.0
+        model.dropout_rate = 0.0
 
-        def fit(model, video, targets, steps=1):
-            optimizer = torch.optim.Adam(model.parameters(), lr=0.00005)#, momentum=0.9, weight_decay=0)
-            dataset = SingleVideoDataset(video[0], 3, fps_range=[1,3], n_clips=steps)
+        def fit(model, video, targets, steps=1, bsz=4):
+            optimizer = torch.optim.AdamW(model.parameters(), lr=0.0001, weight_decay=1e-5)
+            dataset = SingleVideoDataset(video[0].cpu(), 8, fps_range=[1,2], n_clips=steps*bsz)
             train_loader = torch.utils.data.DataLoader(dataset,
-                 batch_size=2, shuffle=False, num_workers=args.workers, pin_memory=True)
+                 batch_size=bsz, shuffle=False, num_workers=args.workers, pin_memory=True)
+            temp = model.temperature
 
-            for _, x in enumerate(train_loader):
+            for step, x in enumerate(train_loader):
                 x = x.to(args.device)
 
                 # output, xent_loss, kldv_loss, diagnostics = model(video, orig=video, targets=targets)
                 # print('step', _, kldv_loss.mean().item(), diagnostics)
+                model.temperature = 0.01 if step < 50 else temp
 
-                output, xent_loss, kldv_loss, diagnostics = model(x, orig=x[0], unfold=True)
-                if (_ % 1) == 0:
-                    print('step', _, xent_loss.mean().item(), diagnostics)
+                if np.random.random() > 0:            
+                    output, xent_loss, kldv_loss, diagnostics = model(x, orig=x[:, 0], unfold=True)
+                else:
+                    # x = random_crop(x[0])[None]
+                    _h, _w = x.shape[-2:]
+                    offset = np.random.randint(0, _w-_h-1)
+                    x = x[..., offset:offset+_h]
+                    output, xent_loss, kldv_loss, diagnostics = model(x, orig=x[:, 0], unfold=False)
+
+                if (step % 10) == 0:
+                    print('step', step, xent_loss.mean().item(), diagnostics)
 
                 loss = (xent_loss.mean() + kldv_loss.mean())
                 optimizer.zero_grad()
                 loss.backward()
+                # print(torch.nn.utils.clip_grad_norm_(model.parameters(), 5), 'grad norm')
+
                 optimizer.step()
             
             optimizer = None
@@ -136,10 +144,10 @@ def test(loader, model, args):
         # targets = (targets[0, 0:1, ..., None, None] == targets[0, 0:1])
         # targets = targets*1.0/ targets.sum(-1).sum(-1)[..., None, None]*1.0
         # targets = targets.flatten(1,2).flatten(-2,-1).cuda()
-
         # fit(model, video, targets, steps=nsteps)
-        fit(model, imgs, None, steps=args.finetune)
-        torch.cuda.empty_cache()
+        if args.finetune > 0:
+            fit(model, imgs, None, steps=args.finetune)
+            torch.cuda.empty_cache()
 
         # model.encoder.model.layer4 = None
         # model.selfsim_fc = crawl.Identity()
@@ -152,7 +160,7 @@ def test(loader, model, args):
         ##################################################################
             t00 = time.time()
 
-            bsize = 5
+            bsize = 5   # minibatch size for computing features
             feats = []
             for b in range(0, imgs.shape[1], bsize):
                 node, feat = model(imgs[:, b:b+bsize].to(args.device), orig=None, just_feats=True)
@@ -177,14 +185,15 @@ def test(loader, model, args):
             keys, query = feats[:, :, key_indices], feats[:, :, n_context:]
 
             # Make spatial radius mask
-            restrict = utils.RestrictAttention(args.radius, flat=False)
-            D = restrict.mask(*query.shape[-2:])[None]
+            restrict = utils.MaskedAttention(args.radius, flat=False)
+            D = restrict.mask(*feats.shape[-2:])[None]
             D = D.flatten(-4, -3).flatten(-2)
             D[D==0] = -1e10; D[D==1] = 0
 
             # Flatten source frame features to make context feature set
             keys, query = keys.flatten(-2), query.flatten(-2)
 
+            print('computing affinity')
             Ws, Is = test_utils.mem_efficient_batched_affinity(query, keys, D, 
                         args.temperature, args.topk_vis, args.long_mem, args.device)
             # Ws, Is = test_utils.batched_affinity(query, keys, D, 
@@ -206,8 +215,6 @@ def test(loader, model, args):
                     print(t)
 
                 ctx_lbls = lbls[key_indices[t]].to(args.device)
-
-                import pdb; pdb.set_trace()
                 ctx_lbls = ctx_lbls.flatten(0, 2).transpose(0, 1)
 
                 pred = (ctx_lbls[:, Is[t]] * Ws[t].to(args.device)[None]).sum(1)
@@ -256,24 +263,16 @@ def test(loader, model, args):
                     [vis.image(np.uint8(_m).transpose(2, 0, 1)) for _m in _maps]
 
             if len(keypts) > 0:
-                # import pdb; pdb.set_trace()
                 coordpath = os.path.join(args.save_path, str(vid_idx) + '.dat')
                 np.stack(keypts, axis=-1).dump(coordpath)
-
+            
             if args.visdom:
-                # wandb.log({'vid%s' % vid_idx: [wandb.Image(mm[0]) for mm in maps]})  
-                for m in maps:
-                    wandb.log({'blend vid%s' % vid_idx: wandb.Image(
-                        m[0])})
-
-                # wandb.log({'blend vid%s' % vid_idx: wandb.Video(
-                # np.array([m[0] for m in maps]).transpose(0, -1, 1, 2), fps=12, format="gif")})  
-                
-                wandb.log({'prob vid%s' % vid_idx: wandb.Video(
-                    np.array([m[-1] for m in maps]).transpose(0, -1, 1, 2), fps=12, format="gif")})  
-                
+                wandb.log({'blend vid%s' % vid_idx: wandb.Video(
+                    np.array([m[0] for m in maps]).transpose(0, -1, 1, 2), fps=12, format="gif")})  
+                # wandb.log({'prob vid%s' % vid_idx: wandb.Video(
+                #     np.array([m[-1] for m in maps]).transpose(0, -1, 1, 2), fps=12, format="gif")})  
                 wandb.log({'plain vid%s' % vid_idx: wandb.Video(
-                    img_orig.numpy(), fps=12, format="gif")})  
+                    imgs_orig[0, n_context:].numpy(), fps=4, format="gif")})  
                 
             torch.cuda.empty_cache()
             print('******* Vid %s TOOK %s *******' % (vid_idx, time.time() - t_vid))

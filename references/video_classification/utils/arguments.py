@@ -118,13 +118,8 @@ def train_args():
     
     parser.add_argument( "--cache-dataset", dest="cache_dataset", help="Cache the datasets for quicker initialization. It also serializes the transforms", action="store_true", )
     parser.add_argument( "--sync-bn", dest="sync_bn", help="Use sync batch norm", action="store_true", )
-    parser.add_argument( "--test-only", dest="test_only", help="Only test the model", action="store_true", )
-
-    parser.add_argument( "--pretrained", dest="pretrained", help="Use pre-trained models from the modelzoo", action="store_true", )
 
     parser.add_argument( "--data-parallel", dest="data_parallel", help="", action="store_true", )
-
-    parser.add_argument( "--zero-diagonal", dest="zero_diagonal", help="", action="store_true", )
 
     parser.add_argument( "--fast-test", dest="fast_test", help="", action="store_true", )
 
@@ -142,7 +137,10 @@ def train_args():
     # my args
     parser.add_argument('--xent-coef', default=1, type=float, help='initial learning rate')
     parser.add_argument('--kldv-coef', default=0, type=float, help='initial learning rate')
+
     parser.add_argument('--dropout', default=0, type=float, help='dropout rate on A')
+    parser.add_argument( "--zero-diagonal", dest="zero_diagonal", help="", action="store_true", )
+
     parser.add_argument('--name', default='', type=str, help='')
 
     parser.add_argument('--frame-transforms', default='crop', type=str,
@@ -185,23 +183,31 @@ def train_args():
     parser.add_argument('--visualize', default=False,
         action='store_true', help='visualize trained model')
 
+    # loss weighting
     parser.add_argument('--long-coef', default=1,
         type=float, help='long cycle loss coef')
     parser.add_argument('--skip-coef', default=0,
         type=float, help='skip cycle loss coef')
-    parser.add_argument('--cal-coef', default=0.0,
-        type=float, help='contrastive affinity')
-
-    parser.add_argument('--shuffle', default=0.0,
-        type=float, help='shuffle patches across instances for different negatives')
-
     parser.add_argument('--xent-weight', default=False, action='store_true',
-        help='use out-going entropy * max similarity as a loss gate')
+        help='use out-going entropy * max similarity to gate loss')
 
     parser.add_argument('--no-maxpool', default=False, action='store_true',
-        help='')
+        help='do not include resnet maxpooling layer')
     parser.add_argument('--use-res4', default=False, action='store_true',
-        help='')
+        help='do not include res4 block')
+
+    # sinkhorn-knopp ideas
+    parser.add_argument('--sk-align', default=False, action='store_true',
+        help='use sinkhorn-knopp to align matches between frames')
+
+    parser.add_argument('--sk-targets', default=False, action='store_true',
+        help='use sinkhorn-knopp to obtain targets, by taking the argmax')
+
+    parser.add_argument('--random-resize', default=[256, 256], nargs=2, type=int,
+        help='randomly resize the patch size')
+
+
+    
 
     args = parser.parse_args()
 

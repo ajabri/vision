@@ -1215,12 +1215,12 @@ def _initialize_weights(model):
 
 
 
-class RestrictAttention(nn.Module):
+class MaskedAttention(nn.Module):
     '''
     A module that restricts attention
     '''
     def __init__(self, radius, flat=True):
-        super(RestrictAttention, self).__init__()
+        super(MaskedAttention, self).__init__()
         self.radius = radius
         self.flat = flat
         self.masks = {}
