@@ -7,9 +7,7 @@ from PIL import Image
 
 jpglist = []
 
-
-
-
+import palette
 
 import argparse
 parser = argparse.ArgumentParser()
@@ -28,23 +26,11 @@ f1.close()
 
 out_folder = args.out_folder
 current_folder = args.in_folder
-palette_list = 'davis/palette.txt'
 
 if not os.path.exists(out_folder):
     os.makedirs(out_folder)
 
-f = open(palette_list, 'r')
-palette = np.zeros((256, 3))
-cnt = 0
-for line in f:
-    rows = line.split()
-    palette[cnt][0] = int(rows[0])
-    palette[cnt][1] = int(rows[1])
-    palette[cnt][2] = int(rows[2])
-    cnt = cnt + 1
-
-f.close()
-palette = palette.astype(np.uint8)
+palette = palette.tensor.astype(np.uint8)
 def color2id(c):
     return np.arange(0, palette.shape[0])[np.all(palette == c, axis=-1)]
 

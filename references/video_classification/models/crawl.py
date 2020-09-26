@@ -397,7 +397,6 @@ class CRaWl(nn.Module):
                     self.viz.text('%s %s' % (t1, t2), opts=dict(height=1, width=10000), win='div')
                     with torch.no_grad():
                         self.visualize_frame_pair(x, ff, mm, t1, t2)
-                        # import pdb; pdb.set_trace()
 
 
             # longer cycle:
@@ -448,7 +447,7 @@ class CRaWl(nn.Module):
             all_A = torch.einsum('ij,kj->ik', all_f, all_f)
 
             with torch.no_grad():
-                utils.nn_patches(self.viz, all_x, all_A[None])
+                utils.visualize.nn_patches(self.viz, all_x, all_A[None])
 
         diag_keys = list(diags.keys())
         for k in diag_keys:
@@ -588,16 +587,16 @@ class CRaWl(nn.Module):
             # # PCA VIZ
             spatialize = lambda xx: xx.view(*xx.shape[:-1], int(xx.shape[-1]**0.5), int(xx.shape[-1]**0.5))
             ff1 , ff2 = spatialize(f1[0]), spatialize(f2[0])
-            pca_ff = utils.pca_feats(torch.stack([ff1,ff2]).detach().cpu())
-            pca_ff = utils.make_gif(pca_ff, outname=None)
+            pca_ff = utils.visualize.pca_feats(torch.stack([ff1,ff2]).detach().cpu())
+            pca_ff = utils.visualize.make_gif(pca_ff, outname=None)
             self.viz.images(pca_ff.transpose(0, -1, 1, 2), win='pcafeats')
         else:
             # X here is B x N x C x T x H x W
             x1, x2 =  x[0, :, :, t1],  x[0, :, :, t2]
             m1, m2 = mm[0, :, :, t1], mm[0, :, :, t2]
 
-            pca_feats = utils.pca_feats(torch.cat([m1, m2]).detach().cpu())
-            pca_feats = utils.make_gif(pca_feats, outname=None, sz=64).transpose(0, -1, 1, 2)
+            pca_feats = utils.visualize.pca_feats(torch.cat([m1, m2]).detach().cpu())
+            pca_feats = utils.visualize.make_gif(pca_feats, outname=None, sz=64).transpose(0, -1, 1, 2)
             
             pca1 = torchvision.utils.make_grid(torch.Tensor(pca_feats[:N]), nrow=int(N**0.5), padding=1, pad_value=1)
             pca2 = torchvision.utils.make_grid(torch.Tensor(pca_feats[N:]), nrow=int(N**0.5), padding=1, pad_value=1)

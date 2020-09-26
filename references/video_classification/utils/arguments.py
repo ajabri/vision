@@ -135,16 +135,16 @@ def train_args():
 
 
     # my args
-    parser.add_argument('--xent-coef', default=1, type=float, help='initial learning rate')
-    parser.add_argument('--kldv-coef', default=0, type=float, help='initial learning rate')
-
-    parser.add_argument('--dropout', default=0, type=float, help='dropout rate on A')
-    parser.add_argument( "--zero-diagonal", dest="zero_diagonal", help="", action="store_true", )
-
     parser.add_argument('--name', default='', type=str, help='')
 
+    parser.add_argument('--xent-coef', default=1, type=float, help='initial learning rate')
+    parser.add_argument('--kldv-coef', default=0, type=float, help='initial learning rate')
+    parser.add_argument('--dropout', default=0, type=float, help='dropout rate on A')
+    parser.add_argument('--zero-diagonal', help='always zero diagonal of A', action="store_true", )
+
+
     parser.add_argument('--frame-transforms', default='crop', type=str,
-        help='blur ^ crop ^ cj ^ flip')
+        help='blur | crop | cj | flip')
     parser.add_argument('--frame-aug', default='', type=str,
         help='(randpatch | grid) + cj ^ flip')
 
@@ -190,7 +190,6 @@ def train_args():
         type=float, help='skip cycle loss coef')
     parser.add_argument('--xent-weight', default=False, action='store_true',
         help='use out-going entropy * max similarity to gate loss')
-
     parser.add_argument('--no-maxpool', default=False, action='store_true',
         help='do not include resnet maxpooling layer')
     parser.add_argument('--use-res4', default=False, action='store_true',
@@ -199,15 +198,11 @@ def train_args():
     # sinkhorn-knopp ideas
     parser.add_argument('--sk-align', default=False, action='store_true',
         help='use sinkhorn-knopp to align matches between frames')
-
     parser.add_argument('--sk-targets', default=False, action='store_true',
         help='use sinkhorn-knopp to obtain targets, by taking the argmax')
-
     parser.add_argument('--random-resize', default=[256, 256], nargs=2, type=int,
         help='randomly resize the patch size')
 
-
-    
 
     args = parser.parse_args()
 

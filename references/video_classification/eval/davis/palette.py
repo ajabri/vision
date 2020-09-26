@@ -1,4 +1,4 @@
-0 0 0
+palette_str = '''0 0 0
 128 0 0
 0 128 0
 128 128 0
@@ -253,4 +253,6 @@
 252 252 252
 253 253 253
 254 254 254
-255 255 255
+255 255 255'''
+import numpy as np
+tensor = np.array([[int(x) for x in line.split()] for line in palette_str.split('\n')])
