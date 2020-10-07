@@ -580,7 +580,7 @@ class CRaWl(nn.Module):
             # self._viz.patches(xx, A)
 
             # Keypoint Correspondences
-            kp_corr = utils.draw_matches(f1[0], f2[0], x1, x2)
+            kp_corr = utils.visualize.draw_matches(f1[0], f2[0], x1, x2)
 
             self.viz.image(kp_corr, win='kpcorr')
 

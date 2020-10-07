@@ -1,7 +1,6 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from scipy.ndimage.filters import gaussian_filter
 
 import torchvision
 import itertools
@@ -12,24 +11,28 @@ import cv2
 import visdom
 import utils
 
-import kornia
-import kornia.augmentation as K
-
-from matplotlib import cm
-color = cm.get_cmap('winter')
-
 EPS = 1e-20
 
-class Identity(nn.Module):
-    def __init__(self, *args, **kwargs):
-        super().__init__()
-    def forward(self, x):
-        return x
+
+class EpCo(nn.Module):
+    def __init__(self, alpha=2048):
+        super(EpCo, self).__init__()
+        self.alpha = alpha
+
+    def forward(self, logits, targets):
+        # import pdb; pdb.
+        x = logits.exp()
+        xa = x * self.alpha
+        
+        mask =  torch.eye(xa.shape[-1]).repeat(x.shape[-2]//x.shape[-1], 1).byte()
+        
+        xa[mask] /= self.alpha
+        pxa = (x/xa.sum(-1, True))[mask]
+        
+        return -pxa.log()
+
 
 class CRaWl(nn.Module):
-    def garg(self, k, d):
-        return getattr(self.args, k, d)
-        
     def __init__(self, args, vis=None):
         super(CRaWl, self).__init__()
         
@@ -39,25 +42,22 @@ class CRaWl(nn.Module):
         self.edgedrop_rate = getattr(args, 'dropout', 0)
         self.featdrop_rate = getattr(args, 'featdrop', 0)
         self.model_type = getattr(args, 'model_type', 'scratch')
-        self.temperature = getattr(args, 'temp', getattr(args, 'temperature',1))
+        self.temperature = getattr(args, 'temp', getattr(args, 'temperature', 0.07))
+
+        self.sk_targets = getattr(args, 'sk_targets', False)
+        self.skip_coef = getattr(args, 'skip_coef', 0)
 
         self.encoder = utils.make_encoder(args).to(self.args.device)
         self.infer_dims()
 
-        self.selfsim_fc = self.make_head(depth=self.garg('head_depth', 0))
+        self.selfsim_fc = self.make_head(depth=getattr(args, 'head_depth', 0))
 
         self.kldv = torch.nn.KLDivLoss(reduction="batchmean")
-        self.xent = torch.nn.CrossEntropyLoss(reduction="none")
-
-        self.target_temp = 1
+        # self.xent = torch.nn.CrossEntropyLoss(reduction="none")
+        self.xent = EpCo(alpha=100)
 
         self._xent_targets = {}
         self._kldv_targets = {}
-        
-        if self.garg('restrict', 0) > 0:
-            self.restrict = utils.MaskedAttention(int(args.restrict))
-        else:
-            self.restrict =  None
 
         self.dropout = torch.nn.Dropout(p=self.edgedrop_rate, inplace=False)
         self.featdrop = torch.nn.Dropout(p=self.featdrop_rate, inplace=False)
@@ -98,7 +98,7 @@ class CRaWl(nn.Module):
     def dropout_mask(self, A):
         return (torch.rand(A.shape) < self.edgedrop_rate).to(self.args.device)
 
-    def compute_affinity(self, x1, x2, do_dropout=True, zero_diagonal=None):
+    def affinity(self, x1, x2, do_dropout=True, zero_diagonal=None):
         if do_dropout and self.featdrop_rate > 0:
             x1, x2 = self.featdrop(x1), self.featdrop(x2)
             x1, x2 = F.normalize(x1, dim=1), F.normalize(x2, dim=1)
@@ -107,9 +107,8 @@ class CRaWl(nn.Module):
             x1, x2 = x1.unsqueeze(-2), x2.unsqueeze(-2)
 
         A = torch.einsum('bctn,bctm->btnm', x1, x2)
-
-        if self.restrict is not None:
-            A = self.restrict(A)
+        # if self.restrict is not None:
+        #     A = self.restrict(A)
 
         return A.squeeze(1)
     
@@ -140,6 +139,8 @@ class CRaWl(nn.Module):
         '''
         B, N, C, T, h, w = x.shape
         maps = self.encoder(x.flatten(0, 1))
+        if next(self.encoder.parameters()).device != x.device:
+            import pdb; pdb.set_trace()
         H, W = maps.shape[-2:]
 
         if N == 1:  # flatten single image's feature map to get node feature 'maps'
@@ -181,15 +182,15 @@ class CRaWl(nn.Module):
         walks = dict()
 
         # Never drop edges in first and last transition matrices
-        As0 = self.compute_affinity(ff[:, :, :1], ff[:, :, 1:2], do_dropout=False)
-        AsT = self.compute_affinity(ff[:, :, -2:-1], ff[:, :, -1:], do_dropout=False)
-        As  = self.compute_affinity(ff[:, :, 1:-2], ff[:, :, 2:-1])
+        As0 = self.affinity(ff[:, :, :1], ff[:, :, 1:2], do_dropout=False)
+        AsT = self.affinity(ff[:, :, -2:-1], ff[:, :, -1:], do_dropout=False)
+        As  = self.affinity(ff[:, :, 1:-2], ff[:, :, 2:-1])
 
         As = torch.cat([As0[:,None], As, AsT[:,None]], dim=1)
         A12s = [self.stoch_mat(As[:, i]) for i in range(T-1)]
 
         #################################################### Palindromes
-        if not self.garg('sk_targets', False):  
+        if not self.sk_targets:  
             A21s = [self.stoch_mat(As[:, i].transpose(-1, -2)) for i in range(T-1)]
             a12, a21 = A12s[0], A21s[0]
             # a12, a21 = torch.eye(A12s[0].shape[-2])[None].cuda(), torch.eye(A21s[0].shape[-1])[None].cuda()
@@ -203,7 +204,7 @@ class CRaWl(nn.Module):
                 aa = a21 @ a12
                 walks[f"cyc {i}"] = [aa, self.xent_targets(aa)]
         
-        #################################################### Sinkhorn-knopp Target
+        #################################################### Sinkhorn-Knopp Target
         else:   
             a12, at = A12s[0], self.stoch_mat(As[:, 0], do_dropout=False, do_sinkhorn=True)
 
@@ -217,9 +218,9 @@ class CRaWl(nn.Module):
                 walks[f"sk {i}"] = [a12, targets]
 
         #################################################### Skip paths
-        if self.garg('skip_coef', 0) > 0:
+        if self.skip_coef > 0:
             t_pairs = [(t1, t2) for (t1, t2) in list(itertools.combinations(range(T), 2)) if (t2-t1) > 1]
-            As  = [self.compute_affinity(ff[:, :, t1], ff[:, :, t2]) for (t1, t2) in t_pairs]
+            As  = [self.affinity(ff[:, :, t1], ff[:, :, t2]) for (t1, t2) in t_pairs]
             A1s = [self.stoch_mat(As[i]) for i in range(T-1)]
             A2s = [self.stoch_mat(As[i].transpose(-1, -2)) for i in range(T-1)]
             AA  = [a@b for (a,b) in zip(A1s, A2s)]
@@ -235,31 +236,25 @@ class CRaWl(nn.Module):
         diags = dict(skip_accur=torch.tensor([0.]).to(self.args.device))
 
         for name, (A, target) in walks.items():
-            loss, acc = self.compute_xent_loss(A, torch.log(A + EPS).flatten(0, -2), targets=target)
-            diags.update({f"{H} xent {name}": loss.mean().detach(), f"{H} acc {name}": acc})
+            logits = torch.log(A+EPS).flatten(0, -2)
+            loss = self.xent(logits, target).mean()
+            acc = (torch.argmax(logits, dim=-1) == target).float().mean()
+            diags.update({
+                f"{H} xent {name}": loss.detach(),
+                f"{H} acc {name}": acc})
             xents += [loss]
 
         #################################################################
         # Visualizations
         #################################################################
 
-        if (np.random.random() < (0.02) or visualize) and (self.viz is not None): # and False:
-            t1, t2 = np.random.randint(0, T, (2))
+        if (np.random.random() < 0.02) and (self.viz is not None): # and False:
             with torch.no_grad():
-                self.visualize_frame_pair(x, ff, mm, t1, t2)
-
+                self.visualize_frame_pair(x, ff, mm)
                 if _N > 1: # and False:
-                    # all patches
-                    all_x = x.permute(0, 3, 1, 2, 4, 5)
-                    all_x = all_x.reshape(-1, *all_x.shape[-3:])
-                    all_f = ff.permute(0, 2, 3, 1).reshape(-1, ff.shape[1])
-                    all_f = all_f.reshape(-1, *all_f.shape[-1:])
-                    all_A = torch.einsum('ij,kj->ik', all_f, all_f)
-
-                    utils.visualize.nn_patches(self.viz, all_x, all_A[None])
+                    self.visualize_patches(x, ff)
 
         return ff, sum(xents)/max(1, len(xents)-1), 0 * sum(kldvs)/max(1, len(kldvs)-1), diags
-
 
     def xent_targets(self, A):
         B, N = A.shape[:2]
@@ -271,136 +266,22 @@ class CRaWl(nn.Module):
 
         return self._xent_targets[key]
 
-    def compute_xent_loss(self, A, log_AA, weight=None, targets=None):
-        # Cross Entropy
-        if targets is None:
-            targets = self.xent_targets(A)
+    def visualize_patches(self, x, ff):
+        # all patches
+        all_x = x.permute(0, 3, 1, 2, 4, 5)
+        all_x = all_x.reshape(-1, *all_x.shape[-3:])
+        all_f = ff.permute(0, 2, 3, 1).reshape(-1, ff.shape[1])
+        all_f = all_f.reshape(-1, *all_f.shape[-1:])
+        all_A = torch.einsum('ij,kj->ik', all_f, all_f)
+        utils.visualize.nn_patches(self.viz, all_x, all_A[None])
 
-        _xent_loss = self.xent(log_AA, targets)
-
-        if weight is not None:
-            _xent_loss = _xent_loss * weight.flatten()
-
-        return _xent_loss.mean().unsqueeze(-1), \
-            (torch.argmax(log_AA, dim=-1) == targets).float().mean().unsqueeze(-1)
-
-
-    def loss_mask(self, A, P):
-        '''
-            P is row-normalized, process stochastic matrix of affinity A
-        '''
-        entropy = (-P * torch.log(P)).sum(-1) / np.log(P.shape[-1])
-        # maxsim = A.max(-1)[0]
-        maxsim = A.topk(k=2, dim=-1)[0][..., -1]
-        xent_weight = 1 / (maxsim * entropy)
-
-        xent_weight = torch.clamp(xent_weight, min=0, max=5)
-        return xent_weight
-
-    def visualize_frame_pair(self, x, ff, mm, t1, t2):
-        normalize = lambda x: (x-x.min()) / (x-x.min()).max()
-
-        # B, C, T, N = ff.shape
+    def visualize_frame_pair(self, x, ff, mm):
+        t1, t2 = np.random.randint(0, ff.shape[-2], (2))
         f1, f2 = ff[:, :, t1], ff[:, :, t2]
 
-        A = self.compute_affinity(f1, f2)
-        A1  = self.stoch_mat(A, False, False)
-        A2 = self.stoch_mat(A.transpose(-1, -2), False, False)
+        A = self.affinity(f1, f2)
+        A1, A2  = self.stoch_mat(A, False, False), self.stoch_mat(A.transpose(-1, -2), False, False)
         AA = A1 @ A2
-        log_AA = torch.log(AA + EPS)
+        xent_loss = self.xent(torch.log(AA + EPS).flatten(0, -2), self.xent_targets(AA))
 
-        log_AA = log_AA.view(-1, log_AA.shape[1])
-        _xent_loss = self.xent(log_AA, self.xent_targets(A))
-
-        N = A.shape[-1]
-        H = W = int(N**0.5)
-        _AA = AA.view(-1, H * W, H, W)
-
-        ##############################################
-        ## LOSS MASK VISUALIZATION
-        ##############################################
-        
-        def mask_to_img(m):
-            return cv2.resize(m.view(H, W).detach().cpu().numpy(), (280,280))
-
-        xent_weight = self.loss_mask(A, AA).detach()        
-        xent_weight_img = mask_to_img(xent_weight[0] / 5.0)
-
-        entropy = (-AA * torch.log(AA)).sum(-1) / np.log(AA.shape[-1])
-        entropy_img = mask_to_img(entropy[0])
-
-        maxsim = A.topk(k=2, dim=-1)[0][..., -1][0]
-        maxsim_img = mask_to_img(maxsim)
-
-        self.viz.images(np.stack([xent_weight_img, entropy_img, maxsim_img])[:, None], nrow=3, win='loss_mask_viz')
-
-        ##############################################
-        ## FLOW
-        ##############################################
-
-        # _A = A.view(*A.shape[:2], f1.shape[-1], -1)
-        # u, v = utils.compute_flow(_A[0:1])
-        # flows = torch.stack([u, v], dim=-1).cpu().numpy()
-        # flows = utils.draw_hsv(flows[0])
-        # flows = cv2.resize(flows, (256, 256))
-        # self.viz.image((flows).transpose(2, 0, 1), win='flow')
-        # # flows = [cv2.resize(flow.clip(min=0).astype(np.uint8), (256, 256)) for flow in flows]
-        # # self.viz.image((flows[0]).transpose(2, 0, 1))
-
-        # import pdb; pdb.set_trace()
-        if (len(x.shape) == 6 and x.shape[1] == 1):
-            x = x.squeeze(1)
-
-        if len(x.shape) < 6:
-            # IMG VIZ
-            # X here is B x C x T x H x W
-            x1, x2 = x[0, :, t1].clone(), x[0, :, t2].clone()
-            # x1 -= x1.min(); x1 /= x1.max()
-            # x2 -= x2.min(); x2 /= x2.max()
-
-            x1, x2 = normalize(x1), normalize(x2)
-
-            xx = torch.stack([x1, x2]).detach().cpu()
-            self.viz.images(xx, win='imgs')
-            # self._viz.patches(xx, A)
-
-            # Keypoint Correspondences
-            kp_corr = utils.draw_matches(f1[0], f2[0], x1, x2)
-
-            self.viz.image(kp_corr, win='kpcorr')
-
-            # # PCA VIZ
-            spatialize = lambda xx: xx.view(*xx.shape[:-1], int(xx.shape[-1]**0.5), int(xx.shape[-1]**0.5))
-            ff1 , ff2 = spatialize(f1[0]), spatialize(f2[0])
-            pca_ff = utils.visualize.pca_feats(torch.stack([ff1,ff2]).detach().cpu())
-            pca_ff = utils.visualize.make_gif(pca_ff, outname=None)
-            self.viz.images(pca_ff.transpose(0, -1, 1, 2), win='pcafeats')
-        else:
-            # X here is B x N x C x T x H x W
-            x1, x2 =  x[0, :, :, t1],  x[0, :, :, t2]
-            m1, m2 = mm[0, :, :, t1], mm[0, :, :, t2]
-
-            pca_feats = utils.visualize.pca_feats(torch.cat([m1, m2]).detach().cpu())
-            pca_feats = utils.visualize.make_gif(pca_feats, outname=None, sz=64).transpose(0, -1, 1, 2)
-            
-            pca1 = torchvision.utils.make_grid(torch.Tensor(pca_feats[:N]), nrow=int(N**0.5), padding=1, pad_value=1)
-            pca2 = torchvision.utils.make_grid(torch.Tensor(pca_feats[N:]), nrow=int(N**0.5), padding=1, pad_value=1)
-            img1 = torchvision.utils.make_grid(normalize(x1)*255, nrow=int(N**0.5), padding=1, pad_value=1)
-            img2 = torchvision.utils.make_grid(normalize(x2)*255, nrow=int(N**0.5), padding=1, pad_value=1)
-            self.viz.images(torch.stack([pca1,pca2]), nrow=4, win='pca_viz_combined1')
-            self.viz.images(torch.stack([img1.cpu(),img2.cpu()]), nrow=4, win='pca_viz_combined2')
-        
-        ##############################################
-        # LOSS VIS
-        ##############################################
-        
-        xx = normalize(_xent_loss[:H*W])
-        img_grid = [cv2.resize(aa, (50,50), interpolation=cv2.INTER_NEAREST)[None] for aa in _AA[0, :, :, :, None].cpu().detach().numpy()]
-        img_grid = [img_grid[_].repeat(3, 0) * np.array(color(xx[_].item()))[:3, None, None] for _ in range(H*W)]
-        img_grid = [img_grid[_] / img_grid[_].max() for _ in range(H*W)]
-        img_grid = torch.from_numpy(np.array(img_grid))
-        img_grid = torchvision.utils.make_grid(img_grid, nrow=H, padding=1, pad_value=1)
-        
-        # img_grid = cv2.resize(img_grid.permute(1, 2, 0).cpu().detach().numpy(), (1000, 1000), interpolation=cv2.INTER_NEAREST).transpose(2, 0, 1)
-        self.viz.images(img_grid, win='lossvis')
-
+        utils.visualize.frame_pair(x, ff, mm, t1, t2, AA, xent_loss, self.viz)

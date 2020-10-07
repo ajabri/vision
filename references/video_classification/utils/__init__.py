@@ -1,13 +1,10 @@
-from __future__ import print_function
 from collections import defaultdict, deque
 import datetime
 import time
 import torch
-import torch.distributed as dist
 
 import errno
 import os
-
 import sys
 
 from . import arguments
@@ -58,6 +55,7 @@ class SmoothedValue(object):
         self.total += value * n
 
     def synchronize_between_processes(self):
+        import torch.distributed as dist
         """
         Warning: does not synchronize the deque!
         """
@@ -215,75 +213,9 @@ def mkdir(path):
             raise
 
 
-def setup_for_distributed(is_master):
-    """
-    This function disables printing when not in master process
-    """
-    import builtins as __builtin__
-    builtin_print = __builtin__.print
-
-    def print(*args, **kwargs):
-        force = kwargs.pop('force', False)
-        if is_master or force:
-            builtin_print(*args, **kwargs)
-
-    __builtin__.print = print
-
-
-def is_dist_avail_and_initialized():
-    if not dist.is_available():
-        return False
-    if not dist.is_initialized():
-        return False
-    return True
-
-
-def get_world_size():
-    if not is_dist_avail_and_initialized():
-        return 1
-    return dist.get_world_size()
-
-
-def get_rank():
-    if not is_dist_avail_and_initialized():
-        return 0
-    return dist.get_rank()
-
-
-def is_main_process():
-    return get_rank() == 0
-
-
-def save_on_master(*args, **kwargs):
-    if is_main_process():
-        torch.save(*args, **kwargs)
-
-
-def init_distributed_mode(args):
-    if 'RANK' in os.environ and 'WORLD_SIZE' in os.environ:
-        args.rank = int(os.environ["RANK"])
-        args.world_size = int(os.environ['WORLD_SIZE'])
-        args.gpu = int(os.environ['LOCAL_RANK'])
-    elif 'SLURM_PROCID' in os.environ:
-        args.rank = int(os.environ['SLURM_PROCID'])
-        args.gpu = args.rank % torch.cuda.device_count()
-    elif hasattr(args, "rank"):
-        pass
-    else:
-        print('Not using distributed mode')
-        args.distributed = False
-        return
-
-    args.distributed = True
-
-    torch.cuda.set_device(args.gpu)
-    args.dist_backend = 'nccl'
-    print('| distributed init (rank {}): {}'.format(
-        args.rank, args.dist_url), flush=True)
-    torch.distributed.init_process_group(backend=args.dist_backend, init_method=args.dist_url,
-                                         world_size=args.world_size, rank=args.rank)
-    setup_for_distributed(args.rank == 0)
-
+#################################################################################
+### Network Utils
+#################################################################################
 
 import math
 import numbers
@@ -306,11 +238,6 @@ def partial_load(pretrained_dict, model, skip_keys=[]):
     model.load_state_dict(model_dict)
 
 
-#################################################################################
-### Network Utils
-#################################################################################
-
-
 def load_cmc_model():
     from .models import cmc_resnet
     r50 = cmc_resnet.InsResNet50()
@@ -324,6 +251,9 @@ def load_vince_model(path):
     return checkpoint
 
 class From3D(nn.Module):
+    '''
+    Use a 2D convnet as a 3D conbnet
+    '''
     def __init__(self, resnet):
         super(From3D, self).__init__()
         self.model = resnet
@@ -337,59 +267,82 @@ class From3D(nn.Module):
         return mm.view(N, T, *mm.shape[-3:]).permute(0, 2, 1, 3, 4)
 
 
-from models import resnet2d, resnet3d, antialiased
+def resnet_forward(self, x):
+        x = self.conv1(x)
+        x = self.bn1(x)
+        x = self.relu(x)
+        x = x if self.maxpool is None else self.maxpool(x) 
+
+        x = self.layer1(x)
+        x = self.layer2(x)
+
+        x = x if self.layer3 is None else self.layer3(x) 
+        x = x if self.layer4 is None else self.layer4(x) 
+    
+        return x        
+
+def adapt_resnet(net, remove_layers=[]):
+    from types import MethodType
+        
+    
+    
+    filter_layers = lambda x: [l for l in x if getattr(net, l) is not None]
+    for layer in filter_layers(['layer3', 'layer4']):
+        for m in getattr(net, layer).modules():
+            if isinstance(m, torch.nn.Conv2d) or isinstance(m, torch.nn.Conv3d):
+                m.stride = tuple(1 for ss in m.stride)
+
+    remove_layers += ['fc', 'avgpool']
+    for layer in filter_layers(remove_layers):
+        setattr(net, layer, None)
+
+    # net.forward = MethodType(resnet_forward, net)
+
+    return net
+
+
+import torchvision.models.resnet as official_resnet
+from models import resnet2d, antialiased
 def make_encoder(args):
 
     model_type = args.model_type
 
     if model_type == 'scratch':
-        import torchvision.models.video.resnet as _resnet3d
-        # resnet = resnet3d.r2d_10(pretrained=False)
+        net = resnet2d.resnet18(pretrained=False)#, norm_layer=norm_layer)
 
-        # resnet = aa_resnet.resnet18(pretrained=False)
-        # norm_layer=lambda x: nn.GroupNorm(1, x)
-        # resnet = resnet2d.resnet34(pretrained=False,)        
+    elif model_type == 'scratchvq':
+        net = resnet2d.resnet18vq(pretrained=False)#, norm_layer=norm_layer)
 
-        resnet = resnet2d.resnet18(pretrained=False)#, norm_layer=norm_layer)
-
-        if args.no_maxpool:
-            resnet.maxpool = None
+    elif model_type == 'official':
+        net = official_resnet.resnet18(pretrained=False)
 
     elif 'vince_weights' in model_type:
         checkpoint = load_vince_model(model_type)
         resnet2d._REFLECT_PAD = False
-        resnet = resnet2d.resnet18(pretrained=False)
-        resnet.load_state_dict(checkpoint)
-        # import pdb; pdb.set_trace()
+        net = resnet2d.resnet18(pretrained=False)
+        net.load_state_dict(checkpoint)
 
     elif model_type == 'aaresnet':
-        resnet = aa_resnet.resnet18(pretrained=False)
+        net = aa_resnet.resnet18(pretrained=False)
         
     elif model_type == 'bagnet':
         import bagnet
-        resnet = bagnet.bagnet33(pretrained=True)
+        net = bagnet.bagnet33(pretrained=True)
         
     elif model_type == 'imagenet':
         resnet2d._REFLECT_PAD = False
-        resnet = resnet2d.resnet18(pretrained=True)
-
-    elif model_type == 'moco':
-        resnet = load_selfsup_model().encoder
+        net = resnet2d.resnet18(pretrained=True)
 
     else: 
         assert False, 'invalid args.model_type'
-        # self.resnet = _resnet3d.r3d_18(pretrained=True)
-        # self.resnet = resnet3d.r2d_18(pretrained=True)
 
+    net = adapt_resnet(net,
+            remove_layers=[] if args.use_res4 else ['layer4'])
 
-    resnet.fc, resnet.avgpool, = None, None
-    if not args.use_res4:
-        resnet.layer4 = None
+    if 'Conv2d' in str(net):  # HACK, if this is a 2D convnet
+        net = From3D(net)
 
-    if 'Conv2d' in str(resnet):
-        resnet = From3D(resnet)
-
-    return resnet
+    return net
 
 
 
@@ -453,6 +406,20 @@ class MaskedAttention(nn.Module):
         return x * mask[0]
 
 
+def log_sinkhorn_knopp(log_alpha, tol=0.01, n_iters=20, verbose=False):
+    m,n  = log_alpha.size()[-2:]
+    log_alpha = log_alpha.view(-1, m, n)
+
+    for i in range(n_iters):
+        # torch.logsumexp(input, dim, keepdim, out=None)
+        #Returns the log of summed exponentials of each row of the input tensor in the given dimension dim
+        #log_alpha -= (torch.logsumexp(log_alpha, dim=2, keepdim=True)).view(-1, n, 1)
+        #log_alpha -= (torch.logsumexp(log_alpha, dim=1, keepdim=True)).view(-1, 1, n)
+        #avoid in-place
+        log_alpha = log_alpha - (torch.logsumexp(log_alpha, dim=2, keepdim=True)).view(-1, m, 1)
+        log_alpha = log_alpha - (torch.logsumexp(log_alpha, dim=1, keepdim=True)).view(-1, 1, n)
+
+    return torch.exp(log_alpha)
 
 def sinkhorn_knopp(A, tol=0.01, max_iter=1000, verbose=False):
     _iter = 0

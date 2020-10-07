@@ -1,4 +1,3 @@
-from __future__ import print_function
 import datetime
 import os
 import time
@@ -19,8 +18,8 @@ from utils.sampler import DistributedSampler, UniformClipSampler, RandomClipSamp
 from utils.scheduler import WarmupMultiStepLR
 
 import numpy as np
-from models import crawl
-# from models import crawl2 as crawl
+# from models import crawl
+from models import crawl2 as crawl
 
 def train_one_epoch(model, criterion, optimizer, lr_scheduler, data_loader, device, epoch, print_freq,
     apex=False, max_steps=1e10, vis=None, checkpoint_fn=None):
@@ -146,7 +145,7 @@ def main(args):
                 print("Saving dataset_train to {}".format(cache_path))
                 utils.mkdir(os.path.dirname(cache_path))
                 dataset.transform = None
-                utils.save_on_master((dataset, traindir), cache_path)
+                torch.save((dataset, traindir), cache_path)
         
         if hasattr(dataset, 'video_clips'):
             dataset.video_clips.compute_clips(args.clip_len, 1, frame_rate=args.frame_skip)
@@ -242,10 +241,10 @@ def main(args):
                 'lr_scheduler': lr_scheduler.state_dict(),
                 'epoch': epoch,
                 'args': args}
-            utils.save_on_master(
+            torch.save(
                 checkpoint,
                 os.path.join(args.output_dir, 'model_{}.pth'.format(epoch)))
-            utils.save_on_master(
+            torch.save(
                 checkpoint,
                 os.path.join(args.output_dir, 'checkpoint.pth'))
 

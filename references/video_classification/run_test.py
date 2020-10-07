@@ -13,6 +13,8 @@ def test(model, L=5, K=2, T=0.01, R=12, opts=[], gpu=0, force=False):
     R = int(R)
 
     if os.path.exists(model) and 'vince_weights' not in model:
+        if os.path.isdir(model):
+            model = sorted([f"{model}/{s}" for s in os.listdir(model) if 'model_' in s], key=os.path.getmtime)[::-1][0]
         model_str = "--model-type scratch --resume %s" % model
         model_name = '_'.join(model.split('/')[1:]) #.replace('/', '_')
     else:

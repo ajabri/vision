@@ -12,6 +12,7 @@ import torch
 from . import transforms as T
 import skimage
 
+from matplotlib import cm
 
 def pca_feats(ff, solver='auto', img_normalize=True):
     ## expect ff to be   N x C x H x W
@@ -387,6 +388,85 @@ def compute_flow(corr):
         v[:, :, i] -= rr
 
     return u, v
+
+
+def frame_pair(x, ff, mm, t1, t2, AA, xent_loss, viz):
+    normalize = lambda x: (x-x.min()) / (x-x.min()).max()
+    N = AA.shape[-1]
+    H = W = int(N**0.5)
+    AA = AA.view(-1, H * W, H, W)
+
+    ##############################################
+    ## FLOW
+    ##############################################
+
+    # _A = A.view(*A.shape[:2], f1.shape[-1], -1)
+    # u, v = utils.compute_flow(_A[0:1])
+    # flows = torch.stack([u, v], dim=-1).cpu().numpy()
+    # flows = utils.draw_hsv(flows[0])
+    # flows = cv2.resize(flows, (256, 256))
+    # self.viz.image((flows).transpose(2, 0, 1), win='flow')
+    # # flows = [cv2.resize(flow.clip(min=0).astype(np.uint8), (256, 256)) for flow in flows]
+    # # self.viz.image((flows[0]).transpose(2, 0, 1))
+
+    ##############################################
+    ## Visualize PCA of Embeddings, Correspondences
+    ##############################################
+
+    # import pdb; pdb.set_trace()
+    if (len(x.shape) == 6 and x.shape[1] == 1):
+        x = x.squeeze(1)
+
+    if len(x.shape) < 6:   # Single image input, no patches
+        # X here is B x C x T x H x W
+        x1, x2 = x[0, :, t1].clone(), x[0, :, t2].clone()
+        x1, x2 = normalize(x1), normalize(x2)
+
+        xx = torch.stack([x1, x2]).detach().cpu()
+        viz.images(xx, win='imgs')
+
+        # Keypoint Correspondences
+        kp_corr = draw_matches(f1[0], f2[0], x1, x2)
+        viz.image(kp_corr, win='kpcorr')
+
+        # # PCA VIZ
+        spatialize = lambda xx: xx.view(*xx.shape[:-1], int(xx.shape[-1]**0.5), int(xx.shape[-1]**0.5))
+        ff1 , ff2 = spatialize(f1[0]), spatialize(f2[0])
+        pca_ff = pca_feats(torch.stack([ff1,ff2]).detach().cpu())
+        pca_ff = make_gif(pca_ff, outname=None)
+        viz.images(pca_ff.transpose(0, -1, 1, 2), win='pcafeats')
+
+    else:  # Patches as input
+        # X here is B x N x C x T x H x W
+        x1, x2 =  x[0, :, :, t1],  x[0, :, :, t2]
+        m1, m2 = mm[0, :, :, t1], mm[0, :, :, t2]
+
+        pca_ff = pca_feats(torch.cat([m1, m2]).detach().cpu())
+        pca_ff = make_gif(pca_ff, outname=None, sz=64).transpose(0, -1, 1, 2)
+        
+        pca1 = torchvision.utils.make_grid(torch.Tensor(pca_ff[:N]), nrow=int(N**0.5), padding=1, pad_value=1)
+        pca2 = torchvision.utils.make_grid(torch.Tensor(pca_ff[N:]), nrow=int(N**0.5), padding=1, pad_value=1)
+        img1 = torchvision.utils.make_grid(normalize(x1)*255, nrow=int(N**0.5), padding=1, pad_value=1)
+        img2 = torchvision.utils.make_grid(normalize(x2)*255, nrow=int(N**0.5), padding=1, pad_value=1)
+        viz.images(torch.stack([pca1,pca2]), nrow=4, win='pca_viz_combined1')
+        viz.images(torch.stack([img1.cpu(),img2.cpu()]), nrow=4, win='pca_viz_combined2')
+    
+    ##############################################
+    # LOSS VIS
+    ##############################################
+    color = cm.get_cmap('winter')
+
+    xx = normalize(xent_loss[:H*W])
+    img_grid = [cv2.resize(aa, (50,50), interpolation=cv2.INTER_NEAREST)[None] 
+                for aa in AA[0, :, :, :, None].cpu().detach().numpy()]
+    img_grid = [img_grid[_].repeat(3, 0) * np.array(color(xx[_].item()))[:3, None, None] for _ in range(H*W)]
+    img_grid = [img_grid[_] / img_grid[_].max() for _ in range(H*W)]
+    img_grid = torch.from_numpy(np.array(img_grid))
+    img_grid = torchvision.utils.make_grid(img_grid, nrow=H, padding=1, pad_value=1)
+    
+    # img_grid = cv2.resize(img_grid.permute(1, 2, 0).cpu().detach().numpy(), (1000, 1000), interpolation=cv2.INTER_NEAREST).transpose(2, 0, 1)
+    viz.images(img_grid, win='lossvis')
+
 
 
 
