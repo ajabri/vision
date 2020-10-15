@@ -13,7 +13,6 @@ IMG_STD  = torch.Tensor([0.2023, 0.1994, 0.2010])
 
 
 '''
-
 Video-level:
     Crop, color aug, flip
 

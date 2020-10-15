@@ -19,10 +19,11 @@ from utils.scheduler import WarmupMultiStepLR
 
 import numpy as np
 # from models import crawl
-from models import crawl2 as crawl
+# from models import crawl2 as crawl
+from model import CRaWl
 
 def train_one_epoch(model, criterion, optimizer, lr_scheduler, data_loader, device, epoch, print_freq,
-    apex=False, max_steps=1e10, vis=None, checkpoint_fn=None):
+    apex=False, vis=None, checkpoint_fn=None):
 
     model.train()
     metric_logger = utils.MetricLogger(delimiter="  ")
@@ -32,9 +33,6 @@ def train_one_epoch(model, criterion, optimizer, lr_scheduler, data_loader, devi
     header = 'Epoch: [{}]'.format(epoch)
 
     for step, (video, orig) in enumerate(metric_logger.log_every(data_loader, print_freq, header)):
-        if step > max_steps:
-            break
-
         start_time = time.time()
 
         video = video.to(device)
@@ -149,7 +147,7 @@ def main(args):
         
         if hasattr(dataset, 'video_clips'):
             dataset.video_clips.compute_clips(args.clip_len, 1, frame_rate=args.frame_skip)
-
+            import pdb; pdb.set_trace()
         return dataset
         
     dataset = prep_dataset()
@@ -176,8 +174,9 @@ def main(args):
         pin_memory=True, collate_fn=collate_fn)
     
     print("Creating model")
-    model = crawl.CRaWl(args, vis=vis).to(device)
-
+    model = CRaWl(args, vis=vis).to(device)
+    print(model)
+    
     if args.distributed and args.sync_bn:
         model = torch.nn.SyncBatchNorm.convert_sync_batchnorm(model)
 
@@ -227,12 +226,6 @@ def main(args):
         args.start_epoch = checkpoint['epoch'] + 1
     ########################### 
 
-    if args.visualize:
-        # nn_visualize(model, data_loader, device, vis=vis)
-        # visualize(model, data_loader, device, vis=vis)
-        tsne(model, data_loader, device, vis=vis)
-        return
-
     def save_model_checkpoint():
         if args.output_dir:
             checkpoint = {
@@ -254,7 +247,7 @@ def main(args):
         if args.distributed:
             train_sampler.set_epoch(epoch)
         train_one_epoch(model, criterion, optimizer, lr_scheduler, data_loader,
-                        device, epoch, args.print_freq, args.apex, max_steps=args.steps_per_epoch,
+                        device, epoch, args.print_freq, args.apex,
                         vis=vis, checkpoint_fn=save_model_checkpoint)
 
     total_time = time.time() - start_time

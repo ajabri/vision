@@ -310,7 +310,7 @@ class CRaWl(nn.Module):
             x = x.view(B, _N, C, T, H, W)
             
         ff, mm = self.pixels_to_nodes(x)
-
+        
         # _ff = ff.view(*ff.shape[:-1], h, w)
         if just_feats:
             h, w = int(np.ceil(x.shape[-2] / self.map_scale)), int(np.ceil(x.shape[-1] / self.map_scale))

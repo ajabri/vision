@@ -223,6 +223,8 @@ from torch import nn
 from torch.nn import functional as F
 from torchvision import transforms
 
+import torchvision.models.resnet as official_resnet
+from models import resnet2d, antialiased
 
 def partial_load(pretrained_dict, model, skip_keys=[]):
     model_dict = model.state_dict()
@@ -232,6 +234,7 @@ def partial_load(pretrained_dict, model, skip_keys=[]):
     skipped_keys = [k for k in pretrained_dict if k not in filtered_dict]
     print('Skipped keys: ',  skipped_keys)
 
+    print('Loading keys: ', filtered_dict.keys())
     # 2. overwrite entries in the existing state dict
     model_dict.update(filtered_dict)
     # 3. load the new state dict
@@ -249,6 +252,45 @@ def load_vince_model(path):
     checkpoint = torch.load(path, map_location={'cuda:0': 'cpu'})
     checkpoint = {k.replace('feature_extractor.module.model.', ''): checkpoint[k] for k in checkpoint if 'feature_extractor' in k}
     return checkpoint
+
+def load_tc_model():
+    path = 'tc_checkpoint.pth.tar'
+    model_state = torch.load(path, map_location='cpu')['state_dict']
+    
+    net = official_resnet.resnet50()
+    net_state = net.state_dict()
+
+    for k in [k for k in model_state.keys() if 'encoderVideo' in k]:
+        kk = k.replace('module.encoderVideo.', '')
+        tmp = model_state[k]
+        if net_state[kk].shape != model_state[k].shape and net_state[kk].dim() == 4 and model_state[k].dim() == 5:
+            tmp = model_state[k].squeeze(2)
+        net_state[kk][:] = tmp[:]
+        
+    net.load_state_dict(net_state)
+
+    # import pdb; pdb.set_trace()
+
+    # afterconv1 = nn.Conv2d(1024, 512, kernel_size=1, bias=False)
+    # relu_layer = nn.ReLU(inplace=True)
+
+    # afterconv1_weight = model_state['module.afterconv1.weight']
+    # afterconv1_weight = afterconv1_weight.squeeze(2)
+
+    # x = afterconv1.state_dict()
+    # x['weight'][:] = afterconv1_weight[:]
+
+    # layers = list(net.children())[:-3]
+    # layers.append(afterconv1)
+    # layers.append(relu_layer)
+    # net = nn.Sequential(*layers)
+
+    # inp = torch.randn(1, 3, 240, 240)
+    # out = net(inp)
+    # print(out.size())
+
+    return net
+
 
 class From3D(nn.Module):
     '''
@@ -296,13 +338,11 @@ def adapt_resnet(net, remove_layers=[]):
     for layer in filter_layers(remove_layers):
         setattr(net, layer, None)
 
-    # net.forward = MethodType(resnet_forward, net)
+    #net.forward = MethodType(resnet_forward, net)
 
     return net
 
 
-import torchvision.models.resnet as official_resnet
-from models import resnet2d, antialiased
 def make_encoder(args):
 
     model_type = args.model_type
@@ -316,6 +356,15 @@ def make_encoder(args):
     elif model_type == 'official':
         net = official_resnet.resnet18(pretrained=False)
 
+    elif model_type == 'moco':
+        resnet2d._REFLECT_PAD = False
+        net = resnet2d.resnet50(pretrained=False)
+        net_ckpt = torch.load('moco_v2_800ep_pretrain.pth.tar')
+        net_state = {k.replace('module.encoder_q.', ''):v for k,v in net_ckpt['state_dict'].items() \
+                if 'module.encoder_q' in k}
+        partial_load(net_state, net)
+        # import pdb; pdb.set_trace()
+
     elif 'vince_weights' in model_type:
         checkpoint = load_vince_model(model_type)
         resnet2d._REFLECT_PAD = False
@@ -325,13 +374,22 @@ def make_encoder(args):
     elif model_type == 'aaresnet':
         net = aa_resnet.resnet18(pretrained=False)
         
+    elif model_type == 'timecycle':
+        net = load_tc_model()
+        
     elif model_type == 'bagnet':
         import bagnet
         net = bagnet.bagnet33(pretrained=True)
         
-    elif model_type == 'imagenet':
+    elif model_type == 'imagenet18':
         resnet2d._REFLECT_PAD = False
         net = resnet2d.resnet18(pretrained=True)
+    elif model_type == 'imagenet34':
+        resnet2d._REFLECT_PAD = False
+        net = resnet2d.resnet34(pretrained=True)
+    elif model_type == 'imagenet50':
+        resnet2d._REFLECT_PAD = False
+        net = resnet2d.resnet50(pretrained=True)
 
     else: 
         assert False, 'invalid args.model_type'

@@ -131,7 +131,10 @@ def get_frame_transform(args):
     tt = []
     fts = args.frame_transforms#.split(',')
 
-    if 'crop' in fts:
+    if 'crop2' in fts:
+        tt.append(torchvision.transforms.RandomResizedCrop(
+            imsz, scale=(0.95, 0.99), ratio=(0.7, 1.3), interpolation=2),)
+    elif 'crop' in fts:
         tt.append(torchvision.transforms.RandomResizedCrop(
             imsz, scale=(0.8, 0.95), ratio=(0.7, 1.3), interpolation=2),)
     else:

@@ -199,6 +199,6 @@ def batched_affinity(query, keys, mask, temperature, topk, long_mem, device):
     
     return Ws, Is
 
-def infer_downscale(model):
+def infer_downscale(model):    
     scale = model(torch.zeros(1, 10, 3, 320, 320).to(next(model.parameters()).device), just_feats=True)[1].shape[-2:]
     return 320 // np.array(scale)

@@ -9,8 +9,10 @@ import torch
 import torch.nn as nn
 import torch.backends.cudnn as cudnn
 
-import models
-from models import crawl
+import model
+from model import CRaWl
+# from models.crawl import CRaWl
+# from crawl import CRaWl
 
 from data import davis_test as davis
 from data import jhmdb_test as jhmdb
@@ -33,7 +35,7 @@ def main(args, vis):
     args.patch_size = [64, 64, 3]
     args.visualize=False
 
-    model = models.CRaWl(args, vis=vis).to(args.device)
+    model = CRaWl(args, vis=vis).to(args.device)
     args.mapScale = test_utils.infer_downscale(model)
 
     dataset = (davis.DavisSet if not 'jhmdb' in args.filelist  else jhmdb.JhmdbSet)(args)

@@ -45,6 +45,8 @@ def test(model, L=5, K=2, T=0.01, R=12, opts=[], gpu=0, force=False):
     if 'nopool' in model_name:
         opts += ['--no-maxpool']
 
+    # opts += ['--use-res4']
+
     # if 'res4' in model_name or '425-noxw' in model_name: # or 'vince' in model_name:
     #     # if not 'res4-nocj-noblur' in model_name: # or True:
     #         opts += ['--use-res4']
